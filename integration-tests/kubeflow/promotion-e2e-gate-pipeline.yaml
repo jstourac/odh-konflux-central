@@ -288,26 +288,58 @@ spec:
               echo "ODH_NOTEBOOK_CONTROLLER_IMAGE: ${ODH_NOTEBOOK_CONTROLLER_IMAGE}"
               echo "KF_NOTEBOOK_CONTROLLER_IMAGE: ${KF_NOTEBOOK_CONTROLLER_IMAGE}"
 
-              echo "=== Patching operator deployment with PR-built controller images ==="
-              # The ODH operator reads controller images from environment variables on its
-              # own deployment. Patching these causes the operator to deploy the controllers
-              # with our PR-built images when reconciling the DataScienceCluster.
-              OPERATOR_DEPLOYMENT=$(oc get deployment -n redhat-ods-operator \
-                  -l control-plane=controller-manager \
-                  -o jsonpath='{.items[0].metadata.name}')
+              # The operator deployment is owned by the CSV -- patching the deployment
+              # directly gets reverted by OLM. We patch the CSV so that OLM propagates
+              # the changes to the deployment. Since DSCi/DSC are not created yet,
+              # there is no need to wait for rollout here -- the operator will pick up
+              # the patched images when it reconciles the DSC in the next step.
 
-              echo "Operator deployment: ${OPERATOR_DEPLOYMENT}"
+              echo "=== Finding installed CSV ==="
+              CSV_NAME=$(oc get subscription opendatahub-operator -n redhat-ods-operator \
+                  -o jsonpath='{.status.installedCSV}')
+              echo "CSV: ${CSV_NAME}"
 
-              # Patch env vars for both controller images on the manager container
-              oc set env deployment/"${OPERATOR_DEPLOYMENT}" -n redhat-ods-operator \
-                  -c manager \
-                  RELATED_IMAGE_ODH_NOTEBOOK_CONTROLLER_IMAGE="${ODH_NOTEBOOK_CONTROLLER_IMAGE}" \
-                  RELATED_IMAGE_ODH_KF_NOTEBOOK_CONTROLLER_IMAGE="${KF_NOTEBOOK_CONTROLLER_IMAGE}"
+              echo "=== Patching CSV env vars with PR-built controller images ==="
+              DEPLOY_IDX=0
 
-              echo "=== Waiting for operator rollout ==="
-              oc rollout status deployment/"${OPERATOR_DEPLOYMENT}" -n redhat-ods-operator --timeout=120s
+              MANAGER_IDX=$(oc get csv "${CSV_NAME}" -n redhat-ods-operator \
+                  -o jsonpath="{.spec.install.spec.deployments[${DEPLOY_IDX}].spec.template.spec.containers[*].name}" \
+                  | tr ' ' '\n' | grep -n 'manager' | cut -d: -f1)
+              MANAGER_IDX=$((MANAGER_IDX - 1))
+              echo "Manager container index: ${MANAGER_IDX}"
 
-              echo "=== Operator patched and restarted ==="
+              ENV_JSON=$(oc get csv "${CSV_NAME}" -n redhat-ods-operator \
+                  -o jsonpath="{.spec.install.spec.deployments[${DEPLOY_IDX}].spec.template.spec.containers[${MANAGER_IDX}].env}")
+
+              ODH_ENV_IDX=$(echo "${ENV_JSON}" | jq 'to_entries[] | select(.value.name == "RELATED_IMAGE_ODH_NOTEBOOK_CONTROLLER_IMAGE") | .key')
+              KF_ENV_IDX=$(echo "${ENV_JSON}" | jq 'to_entries[] | select(.value.name == "RELATED_IMAGE_ODH_KF_NOTEBOOK_CONTROLLER_IMAGE") | .key')
+
+              echo "ODH env var index: ${ODH_ENV_IDX}"
+              echo "KF env var index: ${KF_ENV_IDX}"
+
+              ENV_BASE="/spec/install/spec/deployments/${DEPLOY_IDX}/spec/template/spec/containers/${MANAGER_IDX}/env"
+
+              PATCH="["
+              if [[ -n "${ODH_ENV_IDX}" ]]; then
+                  PATCH="${PATCH}{\"op\":\"replace\",\"path\":\"${ENV_BASE}/${ODH_ENV_IDX}/value\",\"value\":\"${ODH_NOTEBOOK_CONTROLLER_IMAGE}\"},"
+              else
+                  PATCH="${PATCH}{\"op\":\"add\",\"path\":\"${ENV_BASE}/-\",\"value\":{\"name\":\"RELATED_IMAGE_ODH_NOTEBOOK_CONTROLLER_IMAGE\",\"value\":\"${ODH_NOTEBOOK_CONTROLLER_IMAGE}\"}},"
+              fi
+              if [[ -n "${KF_ENV_IDX}" ]]; then
+                  PATCH="${PATCH}{\"op\":\"replace\",\"path\":\"${ENV_BASE}/${KF_ENV_IDX}/value\",\"value\":\"${KF_NOTEBOOK_CONTROLLER_IMAGE}\"}"
+              else
+                  PATCH="${PATCH}{\"op\":\"add\",\"path\":\"${ENV_BASE}/-\",\"value\":{\"name\":\"RELATED_IMAGE_ODH_KF_NOTEBOOK_CONTROLLER_IMAGE\",\"value\":\"${KF_NOTEBOOK_CONTROLLER_IMAGE}\"}}"
+              fi
+              PATCH="${PATCH}]"
+
+              echo "Applying JSON patch to CSV:"
+              echo "${PATCH}" | jq .
+
+              oc patch csv "${CSV_NAME}" -n redhat-ods-operator \
+                  --type=json \
+                  -p "${PATCH}"
+
+              echo "=== CSV patched with PR-built controller images ==="
 
           - name: create-dsc-and-wait
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
