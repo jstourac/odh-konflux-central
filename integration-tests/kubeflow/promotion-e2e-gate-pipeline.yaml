@@ -243,9 +243,9 @@ spec:
 
               echo "=== Waiting for CSV to succeed ==="
               for i in $(seq 1 90); do
-                  CSV_NAME=$(oc get subscription opendatahub-operator -n openshift-operators -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
+                  CSV_NAME=$(oc get subscription opendatahub-operator -n redhat-ods-operator -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
                   if [[ -n "${CSV_NAME}" ]]; then
-                      PHASE=$(oc get csv "${CSV_NAME}" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+                      PHASE=$(oc get csv "${CSV_NAME}" -n redhat-ods-operator -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
                       if [[ "${PHASE}" == "Succeeded" ]]; then
                           echo "CSV ${CSV_NAME} succeeded"
                           break
@@ -259,13 +259,13 @@ spec:
 
               if [[ "${PHASE}" != "Succeeded" ]]; then
                   echo "ERROR: CSV did not reach Succeeded phase within timeout"
-                  oc get subscription opendatahub-operator -n openshift-operators -o yaml
-                  [[ -n "${CSV_NAME}" ]] && oc get csv "${CSV_NAME}" -n openshift-operators -o yaml
+                  oc get subscription opendatahub-operator -n redhat-ods-operator -o yaml
+                  [[ -n "${CSV_NAME}" ]] && oc get csv "${CSV_NAME}" -n redhat-ods-operator -o yaml
                   exit 1
               fi
 
               echo "=== Operator installed successfully ==="
-              oc get pods -n openshift-operators -l control-plane=controller-manager
+              oc get pods -n redhat-ods-operator -l control-plane=controller-manager
 
           - name: patch-controller-images
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
@@ -292,20 +292,20 @@ spec:
               # The ODH operator reads controller images from environment variables on its
               # own deployment. Patching these causes the operator to deploy the controllers
               # with our PR-built images when reconciling the DataScienceCluster.
-              OPERATOR_DEPLOYMENT=$(oc get deployment -n openshift-operators \
+              OPERATOR_DEPLOYMENT=$(oc get deployment -n redhat-ods-operator \
                   -l control-plane=controller-manager \
                   -o jsonpath='{.items[0].metadata.name}')
 
               echo "Operator deployment: ${OPERATOR_DEPLOYMENT}"
 
               # Patch env vars for both controller images on the manager container
-              oc set env deployment/"${OPERATOR_DEPLOYMENT}" -n openshift-operators \
+              oc set env deployment/"${OPERATOR_DEPLOYMENT}" -n redhat-ods-operator \
                   -c manager \
                   RELATED_IMAGE_ODH_NOTEBOOK_CONTROLLER_IMAGE="${ODH_NOTEBOOK_CONTROLLER_IMAGE}" \
                   RELATED_IMAGE_ODH_KF_NOTEBOOK_CONTROLLER_IMAGE="${KF_NOTEBOOK_CONTROLLER_IMAGE}"
 
               echo "=== Waiting for operator rollout ==="
-              oc rollout status deployment/"${OPERATOR_DEPLOYMENT}" -n openshift-operators --timeout=120s
+              oc rollout status deployment/"${OPERATOR_DEPLOYMENT}" -n redhat-ods-operator --timeout=120s
 
               echo "=== Operator patched and restarted ==="
 
@@ -374,15 +374,15 @@ spec:
               if [[ "${PHASE}" != "Ready" ]]; then
                   echo "ERROR: DataScienceCluster did not reach Ready phase"
                   oc get dsc default-dsc -o yaml
-                  oc get pods -n opendatahub
+                  oc get pods -n redhat-ods-applications
                   exit 1
               fi
 
               echo "=== Verifying controller deployments ==="
-              oc get deployments -n opendatahub | grep -E "notebook-controller|odh-notebook-controller" || true
+              oc get deployments -n redhat-ods-applications | grep -E "notebook-controller|odh-notebook-controller" || true
 
               echo "=== Verifying controller images match PR builds ==="
-              oc get deployment -n opendatahub -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .spec.template.spec.containers[*]}{.image}{" "}{end}{"\n"}{end}'
+              oc get deployment -n redhat-ods-applications -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .spec.template.spec.containers[*]}{.image}{" "}{end}{"\n"}{end}'
 
               echo "=== ODH installation complete ==="
 
@@ -452,19 +452,19 @@ spec:
               echo "=== Collecting diagnostic artifacts ==="
 
               echo "--- Controller pods ---"
-              oc get pods -n opendatahub -o wide 2>&1 | tee /artifacts/pods-opendatahub.txt
+              oc get pods -n redhat-ods-applications -o wide 2>&1 | tee /artifacts/pods-redhat-ods-applications.txt
 
               echo "--- Operator pods ---"
-              oc get pods -n openshift-operators -l control-plane=controller-manager -o wide 2>&1 | tee /artifacts/pods-operator.txt
+              oc get pods -n redhat-ods-operator -l control-plane=controller-manager -o wide 2>&1 | tee /artifacts/pods-operator.txt
 
               echo "--- Controller logs (odh-notebook-controller) ---"
-              oc logs -n opendatahub -l app=odh-notebook-controller --tail=200 2>&1 | tee /artifacts/logs-odh-notebook-controller.txt
+              oc logs -n redhat-ods-applications -l app=odh-notebook-controller --tail=200 2>&1 | tee /artifacts/logs-odh-notebook-controller.txt
 
               echo "--- Controller logs (notebook-controller) ---"
-              oc logs -n opendatahub -l app=notebook-controller --tail=200 2>&1 | tee /artifacts/logs-notebook-controller.txt
+              oc logs -n redhat-ods-applications -l app=notebook-controller --tail=200 2>&1 | tee /artifacts/logs-notebook-controller.txt
 
               echo "--- Operator logs ---"
-              oc logs -n openshift-operators -l control-plane=controller-manager --tail=200 2>&1 | tee /artifacts/logs-operator.txt
+              oc logs -n redhat-ods-operator -l control-plane=controller-manager --tail=200 2>&1 | tee /artifacts/logs-operator.txt
 
               echo "--- DSC status ---"
               oc get dsc default-dsc -o yaml 2>&1 | tee /artifacts/dsc-status.yaml
@@ -473,7 +473,7 @@ spec:
               oc get notebooks --all-namespaces -o wide 2>&1 | tee /artifacts/notebooks.txt
 
               echo "--- Events ---"
-              oc get events -n opendatahub --sort-by='.lastTimestamp' 2>&1 | tee /artifacts/events-opendatahub.txt
+              oc get events -n redhat-ods-applications --sort-by='.lastTimestamp' 2>&1 | tee /artifacts/events-redhat-ods-applications.txt
 
               echo "=== Artifacts collected in /artifacts/ ==="
               ls -la /artifacts/
