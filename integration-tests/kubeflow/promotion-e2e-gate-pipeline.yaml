@@ -261,6 +261,10 @@ spec:
                           echo "CSV ${CSV_NAME} succeeded"
                           break
                       fi
+                      if [[ "${PHASE}" == "Failed" ]]; then
+                          echo "ERROR: CSV ${CSV_NAME} entered Failed phase"
+                          break
+                      fi
                       echo "  CSV ${CSV_NAME} phase: ${PHASE} (attempt ${i}/90)"
                   else
                       echo "  Waiting for CSV to be created... (attempt ${i}/90)"
@@ -269,9 +273,19 @@ spec:
               done
 
               if [[ "${PHASE}" != "Succeeded" ]]; then
-                  echo "ERROR: CSV did not reach Succeeded phase within timeout"
+                  echo "ERROR: CSV did not reach Succeeded phase (final phase: ${PHASE})"
+                  echo "--- Subscription ---"
                   oc get subscription opendatahub-operator -n redhat-ods-operator -o yaml
-                  [[ -n "${CSV_NAME}" ]] && oc get csv "${CSV_NAME}" -n redhat-ods-operator -o yaml
+                  if [[ -n "${CSV_NAME}" ]]; then
+                      echo "--- CSV conditions ---"
+                      oc get csv "${CSV_NAME}" -n redhat-ods-operator -o jsonpath='{range .status.conditions[*]}{.type}: {.reason} - {.message}{"\n"}{end}'
+                      echo "--- Operator pods ---"
+                      oc get pods -n redhat-ods-operator -o wide
+                      echo "--- Pod events ---"
+                      oc get events -n redhat-ods-operator --sort-by='.lastTimestamp' | tail -30
+                      echo "--- Pod describe (if any) ---"
+                      oc describe pods -n redhat-ods-operator -l name=rhods-operator 2>/dev/null | tail -50
+                  fi
                   exit 1
               fi
 
