@@ -234,8 +234,8 @@ spec:
                 name: opendatahub-operator
                 namespace: openshift-operators
               spec:
-                channel: fast
-                name: opendatahub-operator
+                channel: odh-stable
+                name: rhods-operator
                 source: odh-operator-catalog
                 sourceNamespace: openshift-marketplace
                 installPlanApproval: Automatic
@@ -302,7 +302,7 @@ spec:
               oc set env deployment/"${OPERATOR_DEPLOYMENT}" -n openshift-operators \
                   -c manager \
                   RELATED_IMAGE_ODH_NOTEBOOK_CONTROLLER_IMAGE="${ODH_NOTEBOOK_CONTROLLER_IMAGE}" \
-                  RELATED_IMAGE_KF_NOTEBOOK_CONTROLLER="${KF_NOTEBOOK_CONTROLLER_IMAGE}"
+                  RELATED_IMAGE_ODH_KF_NOTEBOOK_CONTROLLER_IMAGE="${KF_NOTEBOOK_CONTROLLER_IMAGE}"
 
               echo "=== Waiting for operator rollout ==="
               oc rollout status deployment/"${OPERATOR_DEPLOYMENT}" -n openshift-operators --timeout=120s
