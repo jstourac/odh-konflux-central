@@ -232,7 +232,7 @@ spec:
               kind: Subscription
               metadata:
                 name: opendatahub-operator
-                namespace: openshift-operators
+                namespace: redhat-ods-operator
               spec:
                 channel: odh-stable
                 name: rhods-operator
@@ -328,12 +328,14 @@ spec:
               metadata:
                 name: default-dsci
               spec:
-                applicationsNamespace: opendatahub
+                applicationsNamespace: redhat-ods-applications
                 monitoring:
                   managementState: Managed
-                  namespace: opendatahub
-                serviceMesh:
-                  managementState: Removed
+                  metrics: {}
+                  namespace: redhat-ods-monitoring
+                trustedCABundle:
+                  customCABundle: ''
+                  managementState: Managed
               EOF
 
               echo "=== Creating DataScienceCluster ==="
@@ -346,20 +348,13 @@ spec:
                 components:
                   workbenches:
                     managementState: Managed
+                    workbenchNamespace: rhods-notebooks
                   dashboard:
                     managementState: Managed
-                  datasciencepipelines:
-                    managementState: Removed
-                  kserve:
-                    managementState: Removed
-                  modelmeshserving:
-                    managementState: Removed
-                  ray:
-                    managementState: Removed
-                  trustyai:
-                    managementState: Removed
-                  modelregistry:
-                    managementState: Removed
+                  aiPipelines:
+                    argoWorkflowsControllers:
+                      managementState: Managed
+                    managementState: Managed
               EOF
 
               echo "=== Waiting for DSCInitialization to be ready ==="
@@ -412,6 +407,7 @@ spec:
               #!/bin/bash
               set -ex
 
+              # TODO: Future step for installing uv - we may install this directly in the image
               echo "=== Installing uv ==="
               curl -LsSf https://astral.sh/uv/install.sh | sh
               export PATH="${HOME}/.local/bin:${PATH}"
