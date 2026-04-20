@@ -226,6 +226,17 @@ spec:
                   exit 1
               fi
 
+              echo "=== Creating operator namespace and OperatorGroup ==="
+              oc create namespace redhat-ods-operator || true
+              oc apply -f - <<EOF
+              apiVersion: operators.coreos.com/v1
+              kind: OperatorGroup
+              metadata:
+                name: redhat-ods-operator
+                namespace: redhat-ods-operator
+              spec: {}
+              EOF
+
               echo "=== Creating Subscription ==="
               oc apply -f - <<EOF
               apiVersion: operators.coreos.com/v1alpha1
