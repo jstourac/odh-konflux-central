@@ -339,6 +339,10 @@ spec:
                   --type=json \
                   -p "${PATCH}"
 
+              echo "=== Verifying CSV patch ==="
+              oc get csv "${CSV_NAME}" -n redhat-ods-operator -o json \
+                  | jq '.spec.install.spec.deployments[].spec.template.spec.containers[].env[] | select(.name | startswith("RELATED_IMAGE_ODH_NOTEBOOK_CONTROLLER_IMAGE") or startswith("RELATED_IMAGE_ODH_KF_NOTEBOOK_CONTROLLER_IMAGE"))'
+
               echo "=== CSV patched with PR-built controller images ==="
 
           - name: create-dsc-and-wait
