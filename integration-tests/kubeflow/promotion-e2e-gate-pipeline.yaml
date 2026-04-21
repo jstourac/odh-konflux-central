@@ -498,8 +498,6 @@ spec:
                   dashboard:
                     managementState: Managed
                   aiPipelines:
-                    argoWorkflowsControllers:
-                      managementState: Managed
                     managementState: Managed
               EOF
 
