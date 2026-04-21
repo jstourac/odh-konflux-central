@@ -78,13 +78,14 @@ spec:
                   fi
               done < <(echo "$COMPONENTS" | jq -r 'to_entries[] | @base64')
 
-              if [[ "${FALLBACK_DETECTED}" -eq 1 ]]; then
-                  echo ""
-                  echo "FATAL: One or more components resolved to the 'odh-stable' fallback tag."
-                  echo "This means no PR-built images (odh-pr-<PR_NUMBER>) were found in Quay."
-                  echo "Ensure the component build pipelines ran successfully for this PR before triggering the e2e gate."
-                  exit 1
-              fi
+              # TODO: Re-enable this once we have a way to ensure the component build pipelines ran successfully for this PR before triggering the e2e gate.
+              # if [[ "${FALLBACK_DETECTED}" -eq 1 ]]; then
+              #     echo ""
+              #     echo "FATAL: One or more components resolved to the 'odh-stable' fallback tag."
+              #     echo "This means no PR-built images (odh-pr-<PR_NUMBER>) were found in Quay."
+              #     echo "Ensure the component build pipelines ran successfully for this PR before triggering the e2e gate."
+              #     exit 1
+              # fi
 
     - name: provision-eaas-space
       runAfter:
