@@ -404,25 +404,6 @@ spec:
                 applicationsNamespace: redhat-ods-applications
               EOF
 
-              echo "=== Creating DataScienceCluster ==="
-              oc apply -f - <<EOF
-              apiVersion: datasciencecluster.opendatahub.io/v2
-              kind: DataScienceCluster
-              metadata:
-                labels:
-                  app.kubernetes.io/name: datasciencecluster
-                name: default-dsc
-              spec:
-                components:
-                  workbenches:
-                    managementState: Managed
-                    workbenchNamespace: rhods-notebooks
-                  dashboard:
-                    managementState: Managed
-                  aiPipelines:
-                    managementState: Managed
-              EOF
-
               echo "=== Waiting for DSCInitialization to be ready ==="
               DSCI_READY=""
               for i in $(seq 1 60); do
@@ -450,6 +431,25 @@ spec:
                   oc get events -n redhat-ods-applications --sort-by='.lastTimestamp' | tail -30 2>/dev/null || true
                   exit 1
               fi
+
+              echo "=== Creating DataScienceCluster ==="
+              oc apply -f - <<EOF
+              apiVersion: datasciencecluster.opendatahub.io/v2
+              kind: DataScienceCluster
+              metadata:
+                labels:
+                  app.kubernetes.io/name: datasciencecluster
+                name: default-dsc
+              spec:
+                components:
+                  workbenches:
+                    managementState: Managed
+                    workbenchNamespace: rhods-notebooks
+                  dashboard:
+                    managementState: Managed
+                  aiPipelines:
+                    managementState: Managed
+              EOF
 
               echo "=== Waiting for DataScienceCluster to be ready ==="
               for i in $(seq 1 60); do
