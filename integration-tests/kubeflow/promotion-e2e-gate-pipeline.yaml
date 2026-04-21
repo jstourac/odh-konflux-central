@@ -327,16 +327,17 @@ spec:
               echo "CSV: ${CSV_NAME}"
 
               echo "=== Patching CSV env vars with PR-built controller images ==="
-              DEPLOY_IDX=0
+              CSV_JSON=$(oc get csv "${CSV_NAME}" -n redhat-ods-operator -o json)
 
-              MANAGER_IDX=$(oc get csv "${CSV_NAME}" -n redhat-ods-operator \
-                  -o jsonpath="{.spec.install.spec.deployments[${DEPLOY_IDX}].spec.template.spec.containers[*].name}" \
-                  | tr ' ' '\n' | grep -n 'manager' | cut -d: -f1)
-              MANAGER_IDX=$((MANAGER_IDX - 1))
-              echo "Manager container index: ${MANAGER_IDX}"
+              MANAGER_IDX=$(echo "${CSV_JSON}" | jq '[.spec.install.spec.deployments[0].spec.template.spec.containers[] | .env // [] | any(.name | startswith("RELATED_IMAGE_"))] | to_entries[] | select(.value == true) | .key')
+              if [[ -z "${MANAGER_IDX}" ]]; then
+                  echo "WARN: No container with RELATED_IMAGE_ env vars found, falling back to container 0"
+                  MANAGER_IDX=0
+              fi
+              CONTAINER_NAME=$(echo "${CSV_JSON}" | jq -r ".spec.install.spec.deployments[0].spec.template.spec.containers[${MANAGER_IDX}].name")
+              echo "Target container index: ${MANAGER_IDX} (name: ${CONTAINER_NAME})"
 
-              ENV_JSON=$(oc get csv "${CSV_NAME}" -n redhat-ods-operator \
-                  -o jsonpath="{.spec.install.spec.deployments[${DEPLOY_IDX}].spec.template.spec.containers[${MANAGER_IDX}].env}")
+              ENV_JSON=$(echo "${CSV_JSON}" | jq ".spec.install.spec.deployments[0].spec.template.spec.containers[${MANAGER_IDX}].env")
 
               ODH_ENV_IDX=$(echo "${ENV_JSON}" | jq 'to_entries[] | select(.value.name == "RELATED_IMAGE_ODH_NOTEBOOK_CONTROLLER_IMAGE") | .key')
               KF_ENV_IDX=$(echo "${ENV_JSON}" | jq 'to_entries[] | select(.value.name == "RELATED_IMAGE_ODH_KF_NOTEBOOK_CONTROLLER_IMAGE") | .key')
@@ -344,7 +345,7 @@ spec:
               echo "ODH env var index: ${ODH_ENV_IDX}"
               echo "KF env var index: ${KF_ENV_IDX}"
 
-              ENV_BASE="/spec/install/spec/deployments/${DEPLOY_IDX}/spec/template/spec/containers/${MANAGER_IDX}/env"
+              ENV_BASE="/spec/install/spec/deployments/0/spec/template/spec/containers/${MANAGER_IDX}/env"
 
               PATCH="["
               if [[ -n "${ODH_ENV_IDX}" ]]; then
