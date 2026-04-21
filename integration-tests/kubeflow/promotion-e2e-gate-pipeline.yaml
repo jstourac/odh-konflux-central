@@ -484,9 +484,11 @@ spec:
 
               echo "=== Creating DataScienceCluster ==="
               oc apply -f - <<EOF
-              apiVersion: datasciencecluster.opendatahub.io/v1
+              apiVersion: datasciencecluster.opendatahub.io/v2
               kind: DataScienceCluster
               metadata:
+                labels:
+                  app.kubernetes.io/name: datasciencecluster
                 name: default-dsc
               spec:
                 components:
