@@ -464,6 +464,9 @@ spec:
                     managementState: Managed
                   aiPipelines:
                     managementState: Managed
+                  modelregistry:
+                    managementState: Removed
+                    registriesNamespace: rhoai-model-registries
               EOF
 
               echo "=== Waiting for DataScienceCluster to be ready ==="
