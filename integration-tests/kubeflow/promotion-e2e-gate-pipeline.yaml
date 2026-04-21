@@ -532,6 +532,13 @@ spec:
               cd /workspace/opendatahub-tests
 
               echo "=== Running workbenches e2e tests ==="
+              OC_PATH=$(which oc 2>/dev/null || true)
+              if [[ -n "${OC_PATH}" ]]; then
+                  export OC_BINARY_PATH="${OC_PATH}"
+                  echo "OC_BINARY_PATH=${OC_BINARY_PATH} (reusing oc from image)"
+              else
+                  echo "oc binary not found on image, tests will download it if needed"
+              fi
               uv run pytest tests/workbenches/ \
                   -v \
                   --tb=short \
