@@ -504,6 +504,117 @@ spec:
 
               echo "=== ODH installation complete ==="
 
+          - name: setup-test-idp
+            image: quay.io/rhoai/rhoai-task-toolset:kubeflow
+            env:
+              - name: KUBECONFIG
+                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+            volumeMounts:
+              - name: credentials
+                mountPath: /credentials
+            script: |
+              #!/bin/bash
+              set -ex
+
+              TEST_USER="test-user"
+              TEST_PASSWORD="test-password123"
+
+              echo "=== Setting up htpasswd identity provider ==="
+
+              yum install -y httpd-tools 2>/dev/null || dnf install -y httpd-tools 2>/dev/null || true
+              if ! command -v htpasswd &>/dev/null; then
+                  echo "htpasswd not available, generating bcrypt hash with python"
+                  HTPASSWD_ENTRY=$(python3 -c "
+              import bcrypt, sys
+              password = sys.argv[1].encode()
+              hashed = bcrypt.hashpw(password, bcrypt.gensalt(rounds=10)).decode()
+              print(f'{sys.argv[2]}:{hashed}')
+              " "${TEST_PASSWORD}" "${TEST_USER}" 2>/dev/null || \
+                  python3 -c "
+              import hashlib, base64, os, sys
+              password = sys.argv[1].encode()
+              salt = os.urandom(16)
+              dk = hashlib.pbkdf2_hmac('sha256', password, salt, 100000)
+              print(f'{sys.argv[2]}:{{SSHA}}{base64.b64encode(dk + salt).decode()}')
+              " "${TEST_PASSWORD}" "${TEST_USER}")
+              else
+                  HTPASSWD_ENTRY=$(htpasswd -Bbn "${TEST_USER}" "${TEST_PASSWORD}")
+              fi
+
+              echo "=== Creating htpasswd secret ==="
+              oc create secret generic htpasswd-secret \
+                  --from-literal=htpasswd="${HTPASSWD_ENTRY}" \
+                  -n openshift-config 2>/dev/null || \
+              oc create secret generic htpasswd-secret \
+                  --from-literal=htpasswd="${HTPASSWD_ENTRY}" \
+                  -n openshift-config --dry-run=client -o yaml | oc apply -f -
+
+              echo "=== Patching OAuth to add htpasswd IDP ==="
+              oc get oauth cluster -o json | jq '.spec.identityProviders // []' > /tmp/existing-idps.json
+
+              HAS_HTPASSWD=$(jq '[.[] | select(.name == "htpasswd-provider")] | length' /tmp/existing-idps.json)
+              if [[ "${HAS_HTPASSWD}" -eq 0 ]]; then
+                  oc patch oauth cluster --type=json -p '[{
+                      "op": "add",
+                      "path": "/spec/identityProviders/-",
+                      "value": {
+                          "name": "htpasswd-provider",
+                          "type": "HTPasswd",
+                          "mappingMethod": "claim",
+                          "htpasswd": {
+                              "fileData": {
+                                  "name": "htpasswd-secret"
+                              }
+                          }
+                      }
+                  }]' 2>/dev/null || \
+                  oc patch oauth cluster --type=merge -p '{
+                      "spec": {
+                          "identityProviders": [{
+                              "name": "htpasswd-provider",
+                              "type": "HTPasswd",
+                              "mappingMethod": "claim",
+                              "htpasswd": {
+                                  "fileData": {
+                                      "name": "htpasswd-secret"
+                                  }
+                              }
+                          }]
+                      }
+                  }'
+              else
+                  echo "htpasswd IDP already configured"
+              fi
+
+              echo "=== Waiting for OAuth pods to roll out ==="
+              sleep 10
+              oc wait co/authentication --for=condition=Progressing=False --timeout=300s 2>/dev/null || true
+              oc rollout status deployment/oauth-openshift -n openshift-authentication --timeout=300s 2>/dev/null || true
+
+              echo "=== Creating openldap namespace and secret for test framework ==="
+              oc create namespace openldap 2>/dev/null || true
+
+              USERS_B64=$(echo -n "${TEST_USER}" | base64)
+              PASSWORDS_B64=$(echo -n "${TEST_PASSWORD}" | base64)
+
+              oc apply -f - <<EOF
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: openldap
+                namespace: openldap
+              type: Opaque
+              data:
+                users: ${USERS_B64}
+                passwords: ${PASSWORDS_B64}
+              EOF
+
+              echo "=== Verifying IDP setup ==="
+              oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}'
+              echo ""
+              oc get secret openldap -n openldap
+              echo "=== IDP setup complete ==="
+
           - name: run-workbenches-tests
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
             computeResources:
