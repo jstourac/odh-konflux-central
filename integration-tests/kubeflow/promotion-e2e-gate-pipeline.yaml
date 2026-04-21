@@ -665,10 +665,174 @@ spec:
               echo "=== Test exit code: ${TEST_EXIT_CODE} ==="
               exit ${TEST_EXIT_CODE}
 
-          # TODO: Future step for UI tests (ods-ci or odh-dashboard Cypress)
-          # - name: run-ui-tests
-          #   image: <tbd - cypress or robotframework image>
-          #   ...
+          - name: run-ods-ci-tests
+            image: quay.io/rhoai/rhoai-task-toolset:kubeflow
+            computeResources:
+              requests:
+                memory: "4Gi"
+                cpu: "2"
+              limits:
+                memory: "8Gi"
+                cpu: "4"
+            env:
+              - name: KUBECONFIG
+                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+              - name: AWS_ACCESS_KEY_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: e2e-test-credentials
+                    key: aws-access-key-id
+              - name: AWS_SECRET_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: e2e-test-credentials
+                    key: aws-secret-access-key
+              - name: S3_BUCKET_NAME
+                valueFrom:
+                  secretKeyRef:
+                    name: e2e-test-credentials
+                    key: s3-bucket-name
+              - name: S3_REGION
+                valueFrom:
+                  secretKeyRef:
+                    name: e2e-test-credentials
+                    key: s3-region
+              - name: S3_ENDPOINT
+                valueFrom:
+                  secretKeyRef:
+                    name: e2e-test-credentials
+                    key: s3-endpoint
+              - name: TEST_USER_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: e2e-test-credentials
+                    key: test-user-password
+                    optional: true
+            volumeMounts:
+              - name: credentials
+                mountPath: /credentials
+              - name: artifacts
+                mountPath: /artifacts
+            script: |
+              #!/bin/bash
+              set -ex
+
+              echo "=== Discovering cluster URLs ==="
+              OCP_CONSOLE_URL=$(oc whoami --show-console)
+              OCP_API_URL=$(oc whoami --show-server)
+              ODH_DASHBOARD_URL=$(oc get consolelinks -l "platform.opendatahub.io/part-of=dashboard" -o yaml \
+                  | yq '.items[0].spec.href' 2>/dev/null || echo "")
+              if [[ -z "${ODH_DASHBOARD_URL}" || "${ODH_DASHBOARD_URL}" == "null" ]]; then
+                  ODH_DASHBOARD_URL="https://$(oc get route -n redhat-ods-applications -l app=rhods-dashboard -o jsonpath='{.items[0].spec.host}' 2>/dev/null || echo 'dashboard-not-found')"
+              fi
+
+              echo "OCP_CONSOLE_URL: ${OCP_CONSOLE_URL}"
+              echo "OCP_API_URL: ${OCP_API_URL}"
+              echo "ODH_DASHBOARD_URL: ${ODH_DASHBOARD_URL}"
+
+              TEST_PASSWORD="${TEST_USER_PASSWORD:-test-password123}"
+
+              echo "=== Generating test-variables.yml ==="
+              cat > /workspace/test-variables.yml <<VAREOF
+              BROWSER:
+                NAME: chrome
+                OPTIONS: add_argument("--ignore-certificate-errors");add_argument("window-size=1920,1024");add_argument("--disable-dev-shm-usage");add_argument("--no-sandbox");add_argument('--disable-gpu');add_argument('--headless')
+              OCP_CONSOLE_URL: "${OCP_CONSOLE_URL}"
+              OCP_API_URL: "${OCP_API_URL}"
+              ODH_DASHBOARD_URL: "${ODH_DASHBOARD_URL}"
+              # TODO: OCP_ADMIN_USER - consider using kubeadmin credentials from the
+              # ephemeral cluster instead of an htpasswd user. If keeping htpasswd,
+              # ensure a separate admin user is created in the setup-test-idp step
+              # and granted cluster-admin privileges.
+              OCP_ADMIN_USER:
+                AUTH_TYPE: htpasswd-provider
+                USERNAME: admin
+                PASSWORD: "${TEST_PASSWORD}"
+              # TODO: AUTH_TYPE values must match the IDP name configured on the
+              # cluster. Currently set to "htpasswd-provider" to match the IDP
+              # created in setup-test-idp. Update if the IDP name changes.
+              TEST_USER:
+                AUTH_TYPE: htpasswd-provider
+                USERNAME: test-user
+                PASSWORD: "${TEST_PASSWORD}"
+              TEST_USER_2:
+                AUTH_TYPE: htpasswd-provider
+                USERNAME: test-user
+                PASSWORD: "${TEST_PASSWORD}"
+              TEST_USER_3:
+                AUTH_TYPE: htpasswd-provider
+                USERNAME: test-user
+                PASSWORD: "${TEST_PASSWORD}"
+              TEST_USER_4:
+                AUTH_TYPE: htpasswd-provider
+                USERNAME: test-user
+                PASSWORD: "${TEST_PASSWORD}"
+              S3:
+                AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+                AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+                AWS_DEFAULT_ENDPOINT: "${S3_ENDPOINT}"
+                AWS_DEFAULT_REGION: "${S3_REGION}"
+                BUCKET_1:
+                  NAME: "${S3_BUCKET_NAME}"
+                  REGION: "${S3_REGION}"
+                  ENDPOINT: "${S3_ENDPOINT}"
+                BUCKET_2:
+                  NAME: "${S3_BUCKET_NAME}"
+                  REGION: "${S3_REGION}"
+                  ENDPOINT: "${S3_ENDPOINT}"
+                BUCKET_3:
+                  NAME: "${S3_BUCKET_NAME}"
+                  REGION: "${S3_REGION}"
+                  ENDPOINT: "${S3_ENDPOINT}"
+                BUCKET_4:
+                  NAME: "${S3_BUCKET_NAME}"
+                  REGION: "${S3_REGION}"
+                  ENDPOINT: "${S3_ENDPOINT}"
+                BUCKET_5:
+                  NAME: "${S3_BUCKET_NAME}"
+                  REGION: "${S3_REGION}"
+                  ENDPOINT: "${S3_ENDPOINT}"
+              SERVICE_ACCOUNT:
+                NAME: ""
+                FULL_NAME: ""
+              PRODUCT: RHODS
+              OPERATOR_NAME: rhods-operator
+              INSTALL_TYPE: Cli
+              APPLICATIONS_NAMESPACE: redhat-ods-applications
+              MONITORING_NAMESPACE: redhat-ods-monitoring
+              OPERATOR_NAMESPACE: redhat-ods-operator
+              NOTEBOOKS_NAMESPACE: rhods-notebooks
+              COMPONENTS:
+                dashboard: Managed
+                workbenches: Managed
+                datasciencepipelines: Managed
+              VAREOF
+
+              echo "=== Cloning ods-ci ==="
+              git clone --depth 1 https://github.com/red-hat-data-services/ods-ci.git /workspace/ods-ci
+              cd /workspace/ods-ci/ods_ci
+
+              # TODO: Verify that poetry and Python 3.11 are available on the task
+              # image. run_robot_test.sh requires both. If missing, either switch
+              # to an image that includes them (e.g. the ods-ci container image)
+              # or install them inline before running the script.
+
+              echo "=== Running ods-ci IDE/Elyra tests ==="
+              # TODO: Replace --include tag(s) with the actual Robot Framework
+              # tags for the IDE/JupyterLab/Elyra test suites you want to run
+              # (e.g. --include JupyterHub, --include Elyra, --include IDE).
+              sh run_robot_test.sh \
+                  --skip-oclogin true \
+                  --test-variables-file /workspace/test-variables.yml \
+                  --test-artifact-dir /artifacts/ods-ci \
+                  --no-output-subfolder true \
+                  --include IDE \
+                  --extra-robot-args '--variablefile test-variables-odh-overwrite.yml' \
+                  2>&1 | tee /artifacts/ods-ci-output.log
+              TEST_EXIT_CODE=$?
+
+              echo "=== ods-ci test exit code: ${TEST_EXIT_CODE} ==="
+              exit ${TEST_EXIT_CODE}
 
   finally:
     - name: collect-artifacts
