@@ -405,19 +405,18 @@ spec:
               EOF
 
               echo "=== Waiting for DSCInitialization to be ready ==="
-              DSCI_READY=""
+              DSCI_PHASE=""
               for i in $(seq 1 60); do
-                  DSCI_READY=$(oc get dsci default-dsci -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-                  if [[ "${DSCI_READY}" == "True" ]]; then
+                  DSCI_PHASE=$(oc get dsci default-dsci -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+                  if [[ "${DSCI_PHASE}" == "Ready" ]]; then
                       echo "DSCInitialization is Ready"
                       break
                   fi
-                  DSCI_PHASE=$(oc get dsci default-dsci -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
-                  echo "  DSCi phase: ${DSCI_PHASE}, ready: ${DSCI_READY} (attempt ${i}/60)"
+                  echo "  DSCi phase: ${DSCI_PHASE} (attempt ${i}/60)"
                   sleep 10
               done
 
-              if [[ "${DSCI_READY}" != "True" ]]; then
+              if [[ "${DSCI_PHASE}" != "Ready" ]]; then
                   echo "ERROR: DSCInitialization did not reach Ready condition within timeout"
                   echo "--- DSCi status ---"
                   oc get dsci default-dsci -o yaml
