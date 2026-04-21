@@ -60,15 +60,31 @@ spec:
               set -e
               echo "SNAPSHOT=${SNAPSHOT}"
 
+              FALLBACK_DETECTED=0
               while IFS= read -r row; do
                   COMPONENT_NAME=$(echo "$row" | base64 -d | jq -r '.key')
                   IMAGE=$(jq -r --arg component_name "${COMPONENT_NAME}" '.[$component_name].image' <<< "${SNAPSHOT}")
+                  IMAGE_TAG=$(jq -r --arg component_name "${COMPONENT_NAME}" '.[$component_name].image_tag' <<< "${SNAPSHOT}")
                   GIT_COMMIT=$(jq -r --arg component_name "${COMPONENT_NAME}" '.[$component_name]."git.commit"' <<< "${SNAPSHOT}")
                   GIT_URL=$(jq -r --arg component_name "${COMPONENT_NAME}" '.[$component_name]."git.url"' <<< "${SNAPSHOT}")
                   echo "${COMPONENT_NAME} IMAGE: ${IMAGE}"
+                  echo "  IMAGE_TAG=${IMAGE_TAG}"
                   echo "  GIT_COMMIT=${GIT_COMMIT}"
                   echo "  GIT_URL=${GIT_URL}"
+
+                  if [[ "${IMAGE_TAG}" == "odh-stable" ]]; then
+                      echo "  ERROR: ${COMPONENT_NAME} resolved to fallback tag 'odh-stable' instead of a PR-built image"
+                      FALLBACK_DETECTED=1
+                  fi
               done < <(echo "$COMPONENTS" | jq -r 'to_entries[] | @base64')
+
+              if [[ "${FALLBACK_DETECTED}" -eq 1 ]]; then
+                  echo ""
+                  echo "FATAL: One or more components resolved to the 'odh-stable' fallback tag."
+                  echo "This means no PR-built images (odh-pr-<PR_NUMBER>) were found in Quay."
+                  echo "Ensure the component build pipelines ran successfully for this PR before triggering the e2e gate."
+                  exit 1
+              fi
 
     - name: provision-eaas-space
       runAfter:
