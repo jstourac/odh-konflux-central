@@ -6,9 +6,12 @@ metadata:
 spec:
   description: |
     E2E gate for kubeflow branch promotions (main->stable, stable->v1.10-branch).
-    Provisions an ephemeral HyperShift cluster, installs ODH from CatalogSource,
-    patches controller images with PR-built versions, and runs the opendatahub-tests
-    workbenches suite.
+    Supports two cluster modes:
+      - "byo" (default): Uses a pre-existing OCP cluster with credentials from a
+        Kubernetes Secret. Includes cluster locking (Lease) and cleanup between runs.
+      - "hypershift": Provisions an ephemeral HyperShift cluster via EaaS.
+    Installs ODH from CatalogSource, patches controller images with PR-built
+    versions, and runs the opendatahub-tests workbenches suite.
   params:
     - description: List of components in the group
       name: group-components
@@ -17,7 +20,30 @@ spec:
       name: catalog-source-image
       type: string
       default: quay.io/opendatahub/opendatahub-operator-catalog:odh-stable
+    - name: cluster-mode
+      type: string
+      default: "byo"
+      description: >-
+        Cluster provisioning mode. "byo" uses a pre-existing OCP cluster
+        (credentials from cluster-credentials workspace). "hypershift" provisions
+        an ephemeral HyperShift cluster via EaaS.
+
+  workspaces:
+    - name: git-auth
+      optional: true
+    - name: cluster-credentials
+      optional: true
+      description: >-
+        Secret workspace containing the BYO cluster kubeconfig.
+        Required when cluster-mode is "byo". The secret must have a "kubeconfig" key.
+    - name: shared-data
+      description: Shared workspace for passing kubeconfig between tasks.
+
   tasks:
+    # ====================================================================
+    # Phase 1: Resolve and audit component images
+    # ====================================================================
+
     - name: generate-snapshot
       description: Resolve the latest built images for the group components
       params:
@@ -87,9 +113,207 @@ spec:
               #     exit 1
               # fi
 
+    # ====================================================================
+    # Phase 2a: BYO cluster path (when cluster-mode == "byo")
+    # ====================================================================
+
+    - name: acquire-cluster-lock
+      runAfter:
+        - audit-snapshot
+      when:
+        - input: $(params.cluster-mode)
+          operator: in
+          values: ["byo"]
+      taskSpec:
+        params:
+          - name: pipeline-run-name
+            type: string
+        steps:
+          - name: acquire-lock
+            image: quay.io/konflux-ci/konflux-test:stable
+            env:
+              - name: HOLDER
+                value: "$(params.pipeline-run-name)"
+            script: |
+              #!/bin/bash
+              set -e
+
+              LEASE_NAME="e2e-gate-cluster-lock"
+              LEASE_DURATION=10800  # 3 hours safety net
+              TIMEOUT=3600          # 1 hour max wait
+              NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+              ELAPSED=0
+              BACKOFF=15
+
+              echo "=== Acquiring cluster lock ==="
+              echo "Lease: ${LEASE_NAME} in namespace ${NAMESPACE}"
+              echo "Holder: ${HOLDER}"
+
+              while [[ ${ELAPSED} -lt ${TIMEOUT} ]]; do
+                  CURRENT=$(kubectl get lease "${LEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null || echo "")
+
+                  if [[ -z "${CURRENT}" ]]; then
+                      echo "Lease does not exist, creating..."
+                      kubectl apply -f - <<EOF
+              apiVersion: coordination.k8s.io/v1
+              kind: Lease
+              metadata:
+                name: ${LEASE_NAME}
+                namespace: ${NAMESPACE}
+              spec:
+                holderIdentity: "${HOLDER}"
+                leaseDurationSeconds: ${LEASE_DURATION}
+                acquireTime: "$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"
+                renewTime: "$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"
+              EOF
+                      echo "Lock acquired."
+                      exit 0
+                  fi
+
+                  CURRENT_HOLDER=$(echo "${CURRENT}" | jq -r '.spec.holderIdentity // ""')
+                  RENEW_TIME=$(echo "${CURRENT}" | jq -r '.spec.renewTime // ""')
+                  DURATION=$(echo "${CURRENT}" | jq -r '.spec.leaseDurationSeconds // 0')
+
+                  if [[ "${CURRENT_HOLDER}" == "${HOLDER}" ]]; then
+                      echo "Lock already held by us, refreshing."
+                      kubectl patch lease "${LEASE_NAME}" -n "${NAMESPACE}" \
+                          --type=merge -p "{\"spec\":{\"renewTime\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)\"}}"
+                      exit 0
+                  fi
+
+                  EXPIRED=false
+                  if [[ -n "${RENEW_TIME}" && "${DURATION}" -gt 0 ]]; then
+                      RENEW_EPOCH=$(date -d "${RENEW_TIME}" +%s 2>/dev/null || echo 0)
+                      NOW_EPOCH=$(date +%s)
+                      if [[ $(( NOW_EPOCH - RENEW_EPOCH )) -gt ${DURATION} ]]; then
+                          EXPIRED=true
+                      fi
+                  fi
+
+                  if [[ "${EXPIRED}" == "true" ]]; then
+                      echo "Lease expired (held by ${CURRENT_HOLDER}), taking over..."
+                      kubectl patch lease "${LEASE_NAME}" -n "${NAMESPACE}" \
+                          --type=merge -p "{\"spec\":{\"holderIdentity\":\"${HOLDER}\",\"acquireTime\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)\",\"renewTime\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)\"}}"
+                      echo "Lock acquired (expired takeover)."
+                      exit 0
+                  fi
+
+                  echo "Lock held by '${CURRENT_HOLDER}', waiting ${BACKOFF}s... (${ELAPSED}s/${TIMEOUT}s elapsed)"
+                  sleep ${BACKOFF}
+                  ELAPSED=$((ELAPSED + BACKOFF))
+                  if [[ ${BACKOFF} -lt 120 ]]; then
+                      BACKOFF=$((BACKOFF * 2))
+                      if [[ ${BACKOFF} -gt 120 ]]; then
+                          BACKOFF=120
+                      fi
+                  fi
+              done
+
+              echo "ERROR: Timed out waiting for cluster lock after ${TIMEOUT}s"
+              echo "Current holder: $(kubectl get lease ${LEASE_NAME} -n ${NAMESPACE} -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || echo 'unknown')"
+              exit 1
+      params:
+        - name: pipeline-run-name
+          value: $(context.pipelineRun.name)
+
+    - name: byo-prepare
+      runAfter:
+        - acquire-cluster-lock
+      when:
+        - input: $(params.cluster-mode)
+          operator: in
+          values: ["byo"]
+      workspaces:
+        - name: cluster-credentials
+          workspace: cluster-credentials
+        - name: shared-data
+          workspace: shared-data
+      taskSpec:
+        workspaces:
+          - name: cluster-credentials
+          - name: shared-data
+        steps:
+          - name: write-kubeconfig
+            image: quay.io/konflux-ci/konflux-test:stable
+            script: |
+              #!/bin/bash
+              set -ex
+
+              echo "=== Copying BYO cluster kubeconfig ==="
+              if [[ ! -f "$(workspaces.cluster-credentials.path)/kubeconfig" ]]; then
+                  echo "ERROR: kubeconfig not found in cluster-credentials workspace"
+                  echo "Ensure the e2e-cluster-credentials secret has a 'kubeconfig' key"
+                  ls -la "$(workspaces.cluster-credentials.path)/" || true
+                  exit 1
+              fi
+
+              cp "$(workspaces.cluster-credentials.path)/kubeconfig" "$(workspaces.shared-data.path)/kubeconfig"
+              echo "Kubeconfig written to shared workspace"
+
+              echo "=== Verifying cluster access ==="
+              export KUBECONFIG="$(workspaces.shared-data.path)/kubeconfig"
+              oc whoami
+              oc version
+
+          - name: clean-cluster
+            image: quay.io/rhoai/rhoai-task-toolset:kubeflow
+            env:
+              - name: KUBECONFIG
+                value: "$(workspaces.shared-data.path)/kubeconfig"
+            workingDir: /workspace
+            script: |
+              #!/bin/bash
+              set -e
+
+              echo "=== Cleaning up existing ODH/RHOAI installation ==="
+
+              echo "--- Deleting DataScienceCluster ---"
+              oc delete dsc --all --timeout=120s 2>/dev/null || true
+
+              echo "--- Deleting DSCInitialization ---"
+              oc delete dsci --all --timeout=120s 2>/dev/null || true
+
+              echo "--- Deleting operator Subscription ---"
+              oc delete subscription --all -n redhat-ods-operator --timeout=60s 2>/dev/null || true
+
+              echo "--- Deleting CSVs ---"
+              oc delete csv --all -n redhat-ods-operator --timeout=60s 2>/dev/null || true
+
+              echo "--- Deleting CatalogSource ---"
+              oc delete catalogsource odh-operator-catalog -n openshift-marketplace --timeout=60s 2>/dev/null || true
+
+              echo "--- Deleting OperatorGroup ---"
+              oc delete operatorgroup --all -n redhat-ods-operator --timeout=60s 2>/dev/null || true
+
+              echo "--- Deleting operator namespaces ---"
+              for ns in redhat-ods-operator redhat-ods-applications redhat-ods-monitoring rhods-notebooks; do
+                  if oc get namespace "${ns}" &>/dev/null; then
+                      echo "  Deleting namespace ${ns}"
+                      oc delete namespace "${ns}" --timeout=180s 2>/dev/null || true
+                  fi
+              done
+
+              echo "--- Waiting for namespaces to be fully deleted ---"
+              for ns in redhat-ods-operator redhat-ods-applications redhat-ods-monitoring rhods-notebooks; do
+                  if oc get namespace "${ns}" &>/dev/null; then
+                      echo "  Waiting for namespace ${ns}..."
+                      oc wait --for=delete "namespace/${ns}" --timeout=180s 2>/dev/null || true
+                  fi
+              done
+
+              echo "=== Cluster cleanup complete ==="
+
+    # ====================================================================
+    # Phase 2b: HyperShift path (when cluster-mode == "hypershift")
+    # ====================================================================
+
     - name: provision-eaas-space
       runAfter:
         - audit-snapshot
+      when:
+        - input: $(params.cluster-mode)
+          operator: in
+          values: ["hypershift"]
       taskRef:
         resolver: git
         params:
@@ -108,6 +332,10 @@ spec:
     - name: provision-cluster
       runAfter:
         - provision-eaas-space
+      when:
+        - input: $(params.cluster-mode)
+          operator: in
+          values: ["hypershift"]
       taskSpec:
         results:
           - name: clusterName
@@ -157,20 +385,21 @@ spec:
               - name: instanceType
                 value: m5.2xlarge
 
-    - name: install-odh-and-run-tests
+    - name: hypershift-prepare
       runAfter:
         - provision-cluster
-      params:
-        - name: catalog-source-image
-          value: $(params.catalog-source-image)
+      when:
+        - input: $(params.cluster-mode)
+          operator: in
+          values: ["hypershift"]
+      workspaces:
+        - name: shared-data
+          workspace: shared-data
       taskSpec:
-        params:
-          - name: catalog-source-image
-            type: string
+        workspaces:
+          - name: shared-data
         volumes:
           - name: credentials
-            emptyDir: {}
-          - name: artifacts
             emptyDir: {}
         steps:
           - name: get-kubeconfig
@@ -191,16 +420,147 @@ spec:
               - name: credentials
                 value: credentials
 
-          - name: install-odh-operator
+          - name: setup-test-idp
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
             env:
               - name: KUBECONFIG
                 value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
-              - name: CATALOG_SOURCE_IMAGE
-                value: "$(params.catalog-source-image)"
             volumeMounts:
               - name: credentials
                 mountPath: /credentials
+            script: |
+              #!/bin/bash
+              set -e
+
+              TEST_USER="test-user"
+              TEST_PASSWORD="test-password123"
+              IDP_CONFIGURED=false
+
+              echo "=== Attempting htpasswd identity provider setup ==="
+              echo "(This may fail on HyperShift clusters where OAuth is managed by the HostedCluster)"
+
+              if yum install -y httpd-tools 2>/dev/null || dnf install -y httpd-tools 2>/dev/null; then
+                  true
+              fi
+
+              if command -v htpasswd &>/dev/null; then
+                  HTPASSWD_ENTRY=$(htpasswd -Bbn "${TEST_USER}" "${TEST_PASSWORD}")
+              else
+                  echo "htpasswd not available, generating hash with python"
+                  HTPASSWD_ENTRY=$(python3 -c "
+              import bcrypt, sys
+              password = sys.argv[1].encode()
+              hashed = bcrypt.hashpw(password, bcrypt.gensalt(rounds=10)).decode()
+              print(f'{sys.argv[2]}:{hashed}')
+              " "${TEST_PASSWORD}" "${TEST_USER}" 2>/dev/null || \
+                  python3 -c "
+              import hashlib, base64, os, sys
+              password = sys.argv[1].encode()
+              salt = os.urandom(16)
+              dk = hashlib.pbkdf2_hmac('sha256', password, salt, 100000)
+              print(f'{sys.argv[2]}:{{SSHA}}{base64.b64encode(dk + salt).decode()}')
+              " "${TEST_PASSWORD}" "${TEST_USER}")
+              fi
+
+              echo "=== Creating htpasswd secret ==="
+              oc create secret generic htpasswd-secret \
+                  --from-literal=htpasswd="${HTPASSWD_ENTRY}" \
+                  -n openshift-config 2>/dev/null || \
+              oc create secret generic htpasswd-secret \
+                  --from-literal=htpasswd="${HTPASSWD_ENTRY}" \
+                  -n openshift-config --dry-run=client -o yaml | oc apply -f -
+
+              echo "=== Patching OAuth to add htpasswd IDP ==="
+              if oc patch oauth cluster --type=merge -p '{
+                      "spec": {
+                          "identityProviders": [{
+                              "name": "htpasswd-provider",
+                              "type": "HTPasswd",
+                              "mappingMethod": "claim",
+                              "htpasswd": {
+                                  "fileData": {
+                                      "name": "htpasswd-secret"
+                                  }
+                              }
+                          }]
+                      }
+                  }' 2>&1; then
+                  IDP_CONFIGURED=true
+                  echo "=== Waiting for OAuth pods to roll out ==="
+                  sleep 10
+                  oc wait co/authentication --for=condition=Progressing=False --timeout=300s 2>/dev/null || true
+                  oc rollout status deployment/oauth-openshift -n openshift-authentication --timeout=300s 2>/dev/null || true
+              else
+                  echo "WARNING: OAuth patching failed (expected on HyperShift clusters)."
+                  echo "Tests requiring unprivileged user authentication will be skipped/error."
+              fi
+
+              echo "=== Creating openldap namespace and secret for test framework ==="
+              oc create namespace openldap 2>/dev/null || true
+
+              USERS_B64=$(echo -n "${TEST_USER}" | base64)
+              PASSWORDS_B64=$(echo -n "${TEST_PASSWORD}" | base64)
+
+              oc apply -f - <<EOF
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: openldap
+                namespace: openldap
+              type: Opaque
+              data:
+                users: ${USERS_B64}
+                passwords: ${PASSWORDS_B64}
+              EOF
+
+              echo "=== IDP setup summary ==="
+              echo "IDP configured: ${IDP_CONFIGURED}"
+              oc get secret openldap -n openldap
+              echo "=== IDP setup step complete ==="
+
+          - name: export-kubeconfig
+            image: quay.io/konflux-ci/konflux-test:stable
+            volumeMounts:
+              - name: credentials
+                mountPath: /credentials
+            script: |
+              #!/bin/bash
+              set -ex
+              echo "=== Exporting kubeconfig to shared workspace ==="
+              cp "/credentials/$(steps.get-kubeconfig.results.kubeconfig)" "$(workspaces.shared-data.path)/kubeconfig"
+              echo "Kubeconfig exported."
+
+    # ====================================================================
+    # Phase 3: Install ODH and run tests (shared, mode-agnostic)
+    # ====================================================================
+
+    - name: install-odh-and-run-tests
+      runAfter:
+        - byo-prepare
+        - hypershift-prepare
+      params:
+        - name: catalog-source-image
+          value: $(params.catalog-source-image)
+      workspaces:
+        - name: shared-data
+          workspace: shared-data
+      taskSpec:
+        params:
+          - name: catalog-source-image
+            type: string
+        workspaces:
+          - name: shared-data
+        volumes:
+          - name: artifacts
+            emptyDir: {}
+        steps:
+          - name: install-odh-operator
+            image: quay.io/rhoai/rhoai-task-toolset:kubeflow
+            env:
+              - name: KUBECONFIG
+                value: "$(workspaces.shared-data.path)/kubeconfig"
+              - name: CATALOG_SOURCE_IMAGE
+                value: "$(params.catalog-source-image)"
             script: |
               #!/bin/bash
               set -ex
@@ -315,12 +675,9 @@ spec:
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
             env:
               - name: KUBECONFIG
-                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+                value: "$(workspaces.shared-data.path)/kubeconfig"
               - name: SNAPSHOT
                 value: $(tasks.generate-snapshot.results.SNAPSHOT)
-            volumeMounts:
-              - name: credentials
-                mountPath: /credentials
             script: |
               #!/bin/bash
               set -ex
@@ -331,12 +688,6 @@ spec:
 
               echo "ODH_NOTEBOOK_CONTROLLER_IMAGE: ${ODH_NOTEBOOK_CONTROLLER_IMAGE}"
               echo "KF_NOTEBOOK_CONTROLLER_IMAGE: ${KF_NOTEBOOK_CONTROLLER_IMAGE}"
-
-              # The operator deployment is owned by the CSV -- patching the deployment
-              # directly gets reverted by OLM. We patch the CSV so that OLM propagates
-              # the changes to the deployment. Since DSCi/DSC are not created yet,
-              # there is no need to wait for rollout here -- the operator will pick up
-              # the patched images when it reconciles the DSC in the next step.
 
               echo "=== Finding installed CSV ==="
               CSV_NAME=$(oc get subscription opendatahub-operator -n redhat-ods-operator \
@@ -394,10 +745,7 @@ spec:
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
             env:
               - name: KUBECONFIG
-                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
-            volumeMounts:
-              - name: credentials
-                mountPath: /credentials
+                value: "$(workspaces.shared-data.path)/kubeconfig"
             script: |
               #!/bin/bash
               set -ex
@@ -504,109 +852,6 @@ spec:
 
               echo "=== ODH installation complete ==="
 
-          - name: setup-test-idp
-            image: quay.io/rhoai/rhoai-task-toolset:kubeflow
-            env:
-              - name: KUBECONFIG
-                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
-            volumeMounts:
-              - name: credentials
-                mountPath: /credentials
-            script: |
-              #!/bin/bash
-              set -e
-
-              TEST_USER="test-user"
-              TEST_PASSWORD="test-password123"
-              IDP_CONFIGURED=false
-
-              echo "=== Attempting htpasswd identity provider setup ==="
-              echo "(This may fail on HyperShift clusters where OAuth is managed by the HostedCluster)"
-
-              if yum install -y httpd-tools 2>/dev/null || dnf install -y httpd-tools 2>/dev/null; then
-                  true
-              fi
-
-              if command -v htpasswd &>/dev/null; then
-                  HTPASSWD_ENTRY=$(htpasswd -Bbn "${TEST_USER}" "${TEST_PASSWORD}")
-              else
-                  echo "htpasswd not available, generating hash with python"
-                  HTPASSWD_ENTRY=$(python3 -c "
-              import bcrypt, sys
-              password = sys.argv[1].encode()
-              hashed = bcrypt.hashpw(password, bcrypt.gensalt(rounds=10)).decode()
-              print(f'{sys.argv[2]}:{hashed}')
-              " "${TEST_PASSWORD}" "${TEST_USER}" 2>/dev/null || \
-                  python3 -c "
-              import hashlib, base64, os, sys
-              password = sys.argv[1].encode()
-              salt = os.urandom(16)
-              dk = hashlib.pbkdf2_hmac('sha256', password, salt, 100000)
-              print(f'{sys.argv[2]}:{{SSHA}}{base64.b64encode(dk + salt).decode()}')
-              " "${TEST_PASSWORD}" "${TEST_USER}")
-              fi
-
-              echo "=== Creating htpasswd secret ==="
-              oc create secret generic htpasswd-secret \
-                  --from-literal=htpasswd="${HTPASSWD_ENTRY}" \
-                  -n openshift-config 2>/dev/null || \
-              oc create secret generic htpasswd-secret \
-                  --from-literal=htpasswd="${HTPASSWD_ENTRY}" \
-                  -n openshift-config --dry-run=client -o yaml | oc apply -f -
-
-              echo "=== Patching OAuth to add htpasswd IDP ==="
-              if oc patch oauth cluster --type=merge -p '{
-                      "spec": {
-                          "identityProviders": [{
-                              "name": "htpasswd-provider",
-                              "type": "HTPasswd",
-                              "mappingMethod": "claim",
-                              "htpasswd": {
-                                  "fileData": {
-                                      "name": "htpasswd-secret"
-                                  }
-                              }
-                          }]
-                      }
-                  }' 2>&1; then
-                  IDP_CONFIGURED=true
-                  echo "=== Waiting for OAuth pods to roll out ==="
-                  sleep 10
-                  oc wait co/authentication --for=condition=Progressing=False --timeout=300s 2>/dev/null || true
-                  oc rollout status deployment/oauth-openshift -n openshift-authentication --timeout=300s 2>/dev/null || true
-              else
-                  echo "WARNING: OAuth patching failed (expected on HyperShift clusters)."
-                  echo "Tests requiring unprivileged user authentication will be skipped/error."
-                  echo "To fix: configure the IDP at cluster provisioning time via the HostedCluster spec."
-              fi
-
-              echo "=== Creating openldap namespace and secret for test framework ==="
-              oc create namespace openldap 2>/dev/null || true
-
-              USERS_B64=$(echo -n "${TEST_USER}" | base64)
-              PASSWORDS_B64=$(echo -n "${TEST_PASSWORD}" | base64)
-
-              oc apply -f - <<EOF
-              apiVersion: v1
-              kind: Secret
-              metadata:
-                name: openldap
-                namespace: openldap
-              type: Opaque
-              data:
-                users: ${USERS_B64}
-                passwords: ${PASSWORDS_B64}
-              EOF
-
-              echo "=== IDP setup summary ==="
-              echo "IDP configured: ${IDP_CONFIGURED}"
-              oc get secret openldap -n openldap
-              if [[ "${IDP_CONFIGURED}" == "true" ]]; then
-                  oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}'
-                  echo ""
-              fi
-              echo "=== IDP setup step complete ==="
-
           - name: run-workbenches-tests
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
             computeResources:
@@ -618,17 +863,14 @@ spec:
                 cpu: "4"
             env:
               - name: KUBECONFIG
-                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+                value: "$(workspaces.shared-data.path)/kubeconfig"
             volumeMounts:
-              - name: credentials
-                mountPath: /credentials
               - name: artifacts
                 mountPath: /artifacts
             script: |
               #!/bin/bash
               set -ex
 
-              # TODO: Future step for installing uv - we may install this directly in the image
               echo "=== Installing uv ==="
               curl -LsSf https://astral.sh/uv/install.sh | sh
               export PATH="${HOME}/.local/bin:${PATH}"
@@ -674,7 +916,7 @@ spec:
           #       cpu: "4"
           #   env:
           #     - name: KUBECONFIG
-          #       value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+          #       value: "$(workspaces.shared-data.path)/kubeconfig"
           #     - name: AWS_ACCESS_KEY_ID
           #       valueFrom:
           #         secretKeyRef:
@@ -707,8 +949,6 @@ spec:
           #           key: test-user-password
           #           optional: true
           #   volumeMounts:
-          #     - name: credentials
-          #       mountPath: /credentials
           #     - name: artifacts
           #       mountPath: /artifacts
           #   script: |
@@ -738,17 +978,10 @@ spec:
           #     OCP_CONSOLE_URL: "${OCP_CONSOLE_URL}"
           #     OCP_API_URL: "${OCP_API_URL}"
           #     ODH_DASHBOARD_URL: "${ODH_DASHBOARD_URL}"
-          #     # TODO: OCP_ADMIN_USER - consider using kubeadmin credentials from the
-          #     # ephemeral cluster instead of an htpasswd user. If keeping htpasswd,
-          #     # ensure a separate admin user is created in the setup-test-idp step
-          #     # and granted cluster-admin privileges.
           #     OCP_ADMIN_USER:
           #       AUTH_TYPE: htpasswd-provider
           #       USERNAME: admin
           #       PASSWORD: "${TEST_PASSWORD}"
-          #     # TODO: AUTH_TYPE values must match the IDP name configured on the
-          #     # cluster. Currently set to "htpasswd-provider" to match the IDP
-          #     # created in setup-test-idp. Update if the IDP name changes.
           #     TEST_USER:
           #       AUTH_TYPE: htpasswd-provider
           #       USERNAME: test-user
@@ -832,55 +1065,32 @@ spec:
           #     echo "=== ods-ci test exit code: ${TEST_EXIT_CODE} ==="
           #     exit ${TEST_EXIT_CODE}
 
+  # ====================================================================
+  # Finally: collect artifacts and release cluster lock
+  # ====================================================================
+
   finally:
     - name: collect-artifacts
-      when:
-        - input: $(tasks.provision-cluster.status)
-          operator: in
-          values: ["Succeeded"]
-      params:
-        - name: eaasSpaceSecretRef
-          value: $(tasks.provision-eaas-space.results.secretRef)
-        - name: clusterName
-          value: $(tasks.provision-cluster.results.clusterName)
+      workspaces:
+        - name: shared-data
+          workspace: shared-data
       taskSpec:
-        params:
-          - name: eaasSpaceSecretRef
-            type: string
-          - name: clusterName
-            type: string
-        volumes:
-          - name: credentials
-            emptyDir: {}
+        workspaces:
+          - name: shared-data
         steps:
-          - name: get-kubeconfig
-            ref:
-              resolver: git
-              params:
-                - name: url
-                  value: https://github.com/konflux-ci/build-definitions.git
-                - name: revision
-                  value: main
-                - name: pathInRepo
-                  value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
-            params:
-              - name: eaasSpaceSecretRef
-                value: $(params.eaasSpaceSecretRef)
-              - name: clusterName
-                value: $(params.clusterName)
-              - name: credentials
-                value: credentials
           - name: collect
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
             env:
               - name: KUBECONFIG
-                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
-            volumeMounts:
-              - name: credentials
-                mountPath: /credentials
+                value: "$(workspaces.shared-data.path)/kubeconfig"
             script: |
               #!/bin/bash
               set +e
+
+              if [[ ! -f "${KUBECONFIG}" ]]; then
+                  echo "No kubeconfig found in shared workspace, skipping artifact collection."
+                  exit 0
+              fi
 
               echo "=== Collecting diagnostic artifacts ==="
 
@@ -916,6 +1126,39 @@ spec:
 
               echo "=== Artifact collection complete ==="
 
-  workspaces:
-  - name: git-auth
-    optional: true
+    - name: release-cluster-lock
+      when:
+        - input: $(params.cluster-mode)
+          operator: in
+          values: ["byo"]
+      taskSpec:
+        params:
+          - name: pipeline-run-name
+            type: string
+        steps:
+          - name: release-lock
+            image: quay.io/konflux-ci/konflux-test:stable
+            env:
+              - name: HOLDER
+                value: "$(params.pipeline-run-name)"
+            script: |
+              #!/bin/bash
+              set -e
+
+              LEASE_NAME="e2e-gate-cluster-lock"
+              NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+
+              echo "=== Releasing cluster lock ==="
+              CURRENT_HOLDER=$(kubectl get lease "${LEASE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || echo "")
+
+              if [[ "${CURRENT_HOLDER}" == "${HOLDER}" ]]; then
+                  kubectl delete lease "${LEASE_NAME}" -n "${NAMESPACE}"
+                  echo "Lock released."
+              elif [[ -z "${CURRENT_HOLDER}" ]]; then
+                  echo "No lock found, nothing to release."
+              else
+                  echo "WARNING: Lock held by '${CURRENT_HOLDER}', not '${HOLDER}'. Not releasing."
+              fi
+      params:
+        - name: pipeline-run-name
+          value: $(context.pipelineRun.name)
