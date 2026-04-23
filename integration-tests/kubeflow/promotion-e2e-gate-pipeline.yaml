@@ -514,16 +514,23 @@ spec:
                 mountPath: /credentials
             script: |
               #!/bin/bash
-              set -ex
+              set -e
 
               TEST_USER="test-user"
               TEST_PASSWORD="test-password123"
+              IDP_CONFIGURED=false
 
-              echo "=== Setting up htpasswd identity provider ==="
+              echo "=== Attempting htpasswd identity provider setup ==="
+              echo "(This may fail on HyperShift clusters where OAuth is managed by the HostedCluster)"
 
-              yum install -y httpd-tools 2>/dev/null || dnf install -y httpd-tools 2>/dev/null || true
-              if ! command -v htpasswd &>/dev/null; then
-                  echo "htpasswd not available, generating bcrypt hash with python"
+              if yum install -y httpd-tools 2>/dev/null || dnf install -y httpd-tools 2>/dev/null; then
+                  true
+              fi
+
+              if command -v htpasswd &>/dev/null; then
+                  HTPASSWD_ENTRY=$(htpasswd -Bbn "${TEST_USER}" "${TEST_PASSWORD}")
+              else
+                  echo "htpasswd not available, generating hash with python"
                   HTPASSWD_ENTRY=$(python3 -c "
               import bcrypt, sys
               password = sys.argv[1].encode()
@@ -537,8 +544,6 @@ spec:
               dk = hashlib.pbkdf2_hmac('sha256', password, salt, 100000)
               print(f'{sys.argv[2]}:{{SSHA}}{base64.b64encode(dk + salt).decode()}')
               " "${TEST_PASSWORD}" "${TEST_USER}")
-              else
-                  HTPASSWD_ENTRY=$(htpasswd -Bbn "${TEST_USER}" "${TEST_PASSWORD}")
               fi
 
               echo "=== Creating htpasswd secret ==="
@@ -550,25 +555,7 @@ spec:
                   -n openshift-config --dry-run=client -o yaml | oc apply -f -
 
               echo "=== Patching OAuth to add htpasswd IDP ==="
-              oc get oauth cluster -o json | jq '.spec.identityProviders // []' > /tmp/existing-idps.json
-
-              HAS_HTPASSWD=$(jq '[.[] | select(.name == "htpasswd-provider")] | length' /tmp/existing-idps.json)
-              if [[ "${HAS_HTPASSWD}" -eq 0 ]]; then
-                  oc patch oauth cluster --type=json -p '[{
-                      "op": "add",
-                      "path": "/spec/identityProviders/-",
-                      "value": {
-                          "name": "htpasswd-provider",
-                          "type": "HTPasswd",
-                          "mappingMethod": "claim",
-                          "htpasswd": {
-                              "fileData": {
-                                  "name": "htpasswd-secret"
-                              }
-                          }
-                      }
-                  }]' 2>/dev/null || \
-                  oc patch oauth cluster --type=merge -p '{
+              if oc patch oauth cluster --type=merge -p '{
                       "spec": {
                           "identityProviders": [{
                               "name": "htpasswd-provider",
@@ -581,15 +568,17 @@ spec:
                               }
                           }]
                       }
-                  }'
+                  }' 2>&1; then
+                  IDP_CONFIGURED=true
+                  echo "=== Waiting for OAuth pods to roll out ==="
+                  sleep 10
+                  oc wait co/authentication --for=condition=Progressing=False --timeout=300s 2>/dev/null || true
+                  oc rollout status deployment/oauth-openshift -n openshift-authentication --timeout=300s 2>/dev/null || true
               else
-                  echo "htpasswd IDP already configured"
+                  echo "WARNING: OAuth patching failed (expected on HyperShift clusters)."
+                  echo "Tests requiring unprivileged user authentication will be skipped/error."
+                  echo "To fix: configure the IDP at cluster provisioning time via the HostedCluster spec."
               fi
-
-              echo "=== Waiting for OAuth pods to roll out ==="
-              sleep 10
-              oc wait co/authentication --for=condition=Progressing=False --timeout=300s 2>/dev/null || true
-              oc rollout status deployment/oauth-openshift -n openshift-authentication --timeout=300s 2>/dev/null || true
 
               echo "=== Creating openldap namespace and secret for test framework ==="
               oc create namespace openldap 2>/dev/null || true
@@ -609,11 +598,14 @@ spec:
                 passwords: ${PASSWORDS_B64}
               EOF
 
-              echo "=== Verifying IDP setup ==="
-              oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}'
-              echo ""
+              echo "=== IDP setup summary ==="
+              echo "IDP configured: ${IDP_CONFIGURED}"
               oc get secret openldap -n openldap
-              echo "=== IDP setup complete ==="
+              if [[ "${IDP_CONFIGURED}" == "true" ]]; then
+                  oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}'
+                  echo ""
+              fi
+              echo "=== IDP setup step complete ==="
 
           - name: run-workbenches-tests
             image: quay.io/rhoai/rhoai-task-toolset:kubeflow
