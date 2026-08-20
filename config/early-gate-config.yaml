@@ -36,3 +36,5 @@ config:
       early-gate-enabled: true
     kubeflow:
       early-gate-enabled: true
+    spark-operator:
+      early-gate-enabled: true
