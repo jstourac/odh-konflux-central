@@ -140,6 +140,9 @@
   "model-registry-operator": {
     "odh-model-registry-operator-ci": "opendatahub/model-registry-operator"
   },
+  "modelexpress": {
+    "odh-modelexpress-operator-ci": "opendatahub/odh-modelexpress-operator"
+  },
   "models-as-a-service": {
     "odh-maas-api-ci": "opendatahub/maas-api",
     "odh-maas-controller-ci": "opendatahub/maas-controller"
