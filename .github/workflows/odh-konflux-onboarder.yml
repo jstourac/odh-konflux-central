@@ -84,6 +84,7 @@ on:
           - openshell
           - data-connect-hub
           - praxis-extproc
+          - modelexpress
       pr_target_branch:
         description: 'Target branch for the PR (e.g. main)'
         required: true
