@@ -125,6 +125,10 @@ spec:
     default: "true"
     type: string
     description: Triggers an early gate build pipeline on comment /early-gate-build
+  - name: rhel-subscription-activation-key
+    default: 'custom-activation-key'
+    type: string
+    description: The name of the Kubernetes secret containing org and activationkey for RHEL subscription (used by prefetch-dependencies and buildah for hermetic RPM fetch and builds). See https://konflux-ci.dev/docs/building/activation-keys-subscription/
   results:
   - description: ""
     name: IMAGE_URL
@@ -222,6 +226,8 @@ spec:
       value: $(params.prefetch-log-level)
     - name: config-file-content
       value: $(params.prefetch-config-file-content)
+    - name: ACTIVATION_KEY
+      value: $(params.rhel-subscription-activation-key)
     runAfter:
     - clone-repository
     taskRef:
@@ -270,7 +276,7 @@ spec:
     - name: PRIVILEGED_NESTED
       value: $(params.privileged-nested)
     - name: ACTIVATION_KEY
-      value: custom-activation-key
+      value: $(params.rhel-subscription-activation-key)
     - name: LABELS
       value:
       - $(params.additional-labels[*])
