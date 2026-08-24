@@ -28,7 +28,14 @@ spec:
     value: runtimes/baseline/ubi9-python-3.12/Dockerfile.konflux.cpu
   - name: path-context
     value: .
-  #add these additional params
+  - name: build-args-file
+    value: runtimes/baseline/ubi9-python-3.12/build-args/cpu.conf
+  - name: build-platforms
+    value:
+    - linux/x86_64
+    - linux-m2xlarge/arm64
+    - linux/ppc64le
+    - linux/s390x
   - name: additional-tags
     value:
     - 'odh-pr-{{revision}}'
