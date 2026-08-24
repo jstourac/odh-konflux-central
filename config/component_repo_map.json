@@ -141,6 +141,7 @@
     "odh-model-registry-operator-ci": "opendatahub/model-registry-operator"
   },
   "modelexpress": {
+    "odh-modelexpress-ci": "opendatahub/odh-modelexpress",
     "odh-modelexpress-operator-ci": "opendatahub/odh-modelexpress-operator"
   },
   "models-as-a-service": {
