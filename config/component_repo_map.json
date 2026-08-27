@@ -10,6 +10,9 @@
     "odh-agents-operator-ci": "opendatahub/odh-agents-operator",
     "odh-authbridge-proxy-ci": "opendatahub/odh-authbridge-proxy"
   },
+  "ai-gateway-controller": {
+    "odh-ai-gateway-controller-ci": "opendatahub/odh-ai-gateway-controller"
+  },
   "ai-gateway-operator": {
     "odh-ai-gateway-operator-ci": "opendatahub/odh-ai-gateway-operator"
   },
