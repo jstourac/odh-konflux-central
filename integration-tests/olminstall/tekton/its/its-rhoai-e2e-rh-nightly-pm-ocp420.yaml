@@ -37,7 +37,7 @@ spec:
     - name: TEST_GATES
       value: "bvt,smoke"
     - name: QUAY_PULL_SECRET_NAME
-      value: "rhoai-quay-secret"
+      value: "rhoai-external-quay-secret"
     - name: ROSA_HCP_KYVERNO_SECRET
       value: "olminstall-rosa-hcp-kyverno"
     - name: SCRIPTS_REPO_URL

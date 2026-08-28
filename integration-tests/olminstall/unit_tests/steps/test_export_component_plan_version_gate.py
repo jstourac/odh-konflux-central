@@ -24,7 +24,7 @@ class ExportComponentPlanVersionGateTest(unittest.TestCase):
                 "COMPONENTS_CONFIG": str(cfg),
                 "COMPONENT_TEST_PLAN_JSON": str(out),
                 "TEST_GATES": "smoke",
-                "PRODUCT": "existing",
+                "PRODUCT": "",
                 "OPERATOR_VERSION": "3.5.0-ea.2",
             }
             with patch.dict(os.environ, env, clear=False):

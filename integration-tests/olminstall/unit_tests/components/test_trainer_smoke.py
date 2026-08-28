@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for trainer smoke patch on EaaS IDMS registry.redhat.io/rhoai mirror parity."""
+"""Tests for trainer smoke patch on EPHC IDMS registry.redhat.io/rhoai mirror parity."""
 
 from __future__ import annotations
 
@@ -15,7 +15,12 @@ class TrainerSmokeTest(unittest.TestCase):
         shell = trainer_smoke_rhoai_idms_patch_shell()
         self.assertIn("expectedImage := imagePrefix +", shell)
         self.assertIn('expectedImage := strings.Replace(imagePrefix + "/" + expectedRuntime.Image', shell)
+        self.assertIn('added strings import to trainer/cluster_training_runtimes_test.go', shell)
         self.assertIn('"odh-trainer", "odh-trainer")', shell)
+        self.assertIn("odh-th-torch-cuda-py312", shell)
+        # Image name lives in trainer utils, not only cluster_training_runtimes_test.go.
+        self.assertIn("find trainer", shell)
+        self.assertIn("skip hub runtime name drift", shell)
 
     def test_sed_uses_hash_delimiter(self) -> None:
         shell = trainer_smoke_rhoai_idms_patch_shell()

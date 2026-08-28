@@ -14,7 +14,7 @@ from components.dashboard_cypress.source_ref import (
 class DashboardSourceRefTest(unittest.TestCase):
     def test_maps_rhoai_341_to_rhoai_34_branch(self) -> None:
         self.assertEqual(
-            resolve_dashboard_source_ref("3.4.1", catalog_ref="main", product="existing"),
+            resolve_dashboard_source_ref("3.4.1", catalog_ref="main", product=""),
             "rhoai-3.4",
         )
 
@@ -32,18 +32,18 @@ class DashboardSourceRefTest(unittest.TestCase):
 
     def test_unknown_version_uses_catalog_fallback(self) -> None:
         self.assertEqual(
-            resolve_dashboard_source_ref("(unknown)", catalog_ref="main", product="existing"),
+            resolve_dashboard_source_ref("(unknown)", catalog_ref="main", product=""),
             "main",
         )
         self.assertEqual(
-            resolve_dashboard_source_ref("", catalog_ref="rhoai-3.3", product="existing"),
+            resolve_dashboard_source_ref("", catalog_ref="rhoai-3.3", product=""),
             "rhoai-3.3",
         )
 
     def test_env_override_wins(self) -> None:
         with mock.patch.dict(os.environ, {"DASHBOARD_SOURCE_REF_OVERRIDE": "feature/foo"}, clear=False):
             self.assertEqual(
-                resolve_dashboard_source_ref("3.4.1", catalog_ref="main", product="existing"),
+                resolve_dashboard_source_ref("3.4.1", catalog_ref="main", product=""),
                 "feature/foo",
             )
 
@@ -52,7 +52,7 @@ class DashboardSourceRefTest(unittest.TestCase):
             "3.4.1",
             catalog_repo="https://github.com/opendatahub-io/odh-dashboard.git",
             catalog_ref="main",
-            product="existing",
+            product="",
         )
         self.assertEqual(src.ref, "rhoai-3.4")
         self.assertEqual(src.repo, "https://github.com/red-hat-data-services/odh-dashboard.git")
@@ -62,7 +62,7 @@ class DashboardSourceRefTest(unittest.TestCase):
             "(unknown)",
             catalog_repo="https://github.com/opendatahub-io/odh-dashboard.git",
             catalog_ref="main",
-            product="existing",
+            product="",
         )
         self.assertEqual(src.repo, "https://github.com/opendatahub-io/odh-dashboard.git")
         self.assertEqual(src.ref, "main")

@@ -32,3 +32,27 @@ class DscWebhookWaitTest(unittest.TestCase):
         ):
             dsc_install.wait_operator_admission_webhook(timeout_sec=30)
 
+    def test_patch_dsc_merge_retries_on_webhook_no_endpoints(self) -> None:
+        responses = [
+            type(
+                "R",
+                (),
+                {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "failed calling webhook: no endpoints available for service",
+                },
+            )(),
+            type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        ]
+        with (
+            mock.patch.object(dsc_install, "oc_run", side_effect=responses) as oc_mock,
+            mock.patch.object(dsc_install.time, "sleep"),
+        ):
+            dsc_install._patch_dsc_merge_with_webhook_retry(
+                '{"spec":{"components":{"aipipelines":{"managementState":"Managed"}}}}',
+                label="aipipelines=Managed",
+                timeout_sec=60,
+            )
+        self.assertEqual(oc_mock.call_count, 2)
+

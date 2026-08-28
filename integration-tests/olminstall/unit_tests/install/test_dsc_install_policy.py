@@ -92,5 +92,57 @@ class DscInstallPolicyTest(unittest.TestCase):
         self.assertIn("ogx", managed)
         self.assertNotIn("llamastackoperator", managed)
 
+    def test_ogx_selection_drops_llamastack_even_without_operator_version(self) -> None:
+        managed = resolve_managed_dsc_keys("ogx", "", for_install=False)
+        self.assertIn("ogx", managed)
+        self.assertNotIn("llamastackoperator", managed)
+
+    def test_ogx_with_llama_stack_keeps_llamastackoperator(self) -> None:
+        managed = resolve_managed_dsc_keys("ogx,llama_stack", "", for_install=False)
+        self.assertIn("ogx", managed)
+        self.assertIn("llamastackoperator", managed)
+
+
+class BatchEnsureDscManagedTest(unittest.TestCase):
+    @patch("install.dsc_install._resolve_operator_version_for_dsc", return_value="")
+    @patch("install.dsc_install._cr_exists", return_value=True)
+    @patch("install.dsc_install.dsc_component_management_state", return_value="Managed")
+    @patch("install.dsc_install.ensure_dsc_component_removed")
+    @patch("install.dsc_install.ensure_dsc_component_managed")
+    def test_does_not_reenable_llamastack_when_ogx_selected(
+        self,
+        ensure_managed,
+        ensure_removed,
+        _state,
+        _exists,
+        _ver,
+    ) -> None:
+        from install.dsc_install import batch_ensure_dsc_managed_for_smoke
+
+        batch_ensure_dsc_managed_for_smoke({"ogx"})
+        ensure_removed.assert_called_with("llamastackoperator")
+        managed_keys = [call.args[0] for call in ensure_managed.call_args_list]
+        self.assertIn("ogx", managed_keys)
+        self.assertNotIn("llamastackoperator", managed_keys)
+
+    @patch("install.dsc_install._resolve_operator_version_for_dsc", return_value="")
+    @patch("install.dsc_install._cr_exists", return_value=True)
+    @patch("install.dsc_install.dsc_component_management_state", return_value="Managed")
+    @patch("install.dsc_install.ensure_dsc_component_removed")
+    @patch("install.dsc_install.ensure_dsc_component_managed")
+    def test_keeps_llamastack_when_ogx_and_llama_stack_selected(
+        self,
+        ensure_managed,
+        ensure_removed,
+        _state,
+        _exists,
+        _ver,
+    ) -> None:
+        from install.dsc_install import batch_ensure_dsc_managed_for_smoke
+
+        batch_ensure_dsc_managed_for_smoke({"ogx", "llama_stack"})
+        ensure_removed.assert_not_called()
+
+
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

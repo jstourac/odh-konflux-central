@@ -9,10 +9,34 @@ const _operatorNamespace = (): string =>
   String(Cypress.env('OPERATOR_NAMESPACE') || 'redhat-ods-operator');
 
 Cypress.Commands.overwrite('exec', (originalFn: any, command: any, options: any) => {
+  const opts = { ...(options || {}) };
+  if (
+    typeof command === 'string'
+    && /^\s*oc\s+login\b/.test(command)
+    && _ciOcToken
+    && !/--token\b/.test(command)
+  ) {
+    const server = String(
+      Cypress.env('OC_SERVER') || Cypress.env('CYPRESS_OC_SERVER') || '',
+    ).trim();
+    if (server) {
+      command = `oc login --token=${_ciOcToken} --server=${server} --insecure-skip-tls-verify=true`;
+      opts.failOnNonZeroExit = false;
+    }
+  }
   if (typeof command === 'string' && /\s-n\s+default\b/.test(command)) {
     command = command.replace(/\s-n\s+default\b/g, ` -n ${_operatorNamespace()}`);
   }
-  return originalFn(command, options);
+  // HyperShift guest project deletion often never finishes --wait (cxn7l 180s/300s hangs).
+  if (typeof command === 'string' && /oc\s+delete\s+(project|namespace)\b/.test(command)) {
+    command = command.replace(/\s--wait(?!=)/g, ' --wait=false');
+    if (!/--wait=/.test(command)) {
+      command = `${command} --wait=false`;
+    }
+    opts.failOnNonZeroExit = false;
+    opts.timeout = Math.min(Number(opts.timeout) || 20000, 20000);
+  }
+  return originalFn(command, opts);
 });
 
 if (_ciOcToken) {

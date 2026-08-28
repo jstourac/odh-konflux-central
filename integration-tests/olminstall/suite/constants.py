@@ -4,10 +4,10 @@ from pathlib import Path
 
 DEFAULT_NAMESPACE = "rhoai-tenant"
 DEFAULT_APP = "testops-playpen"
-# EaaS provision-eaas-space needs create on namespaces.eaas.konflux-ci.dev (konflux-integration-runner CR).
+# provision-ephemeral-cluster creates TestPlatformCluster (konflux-integration-runner SA).
 KONFLUX_INTEGRATION_SERVICE_ACCOUNT = "konflux-integration-runner"
-# Canonical EaaS ITS (its-rhoai-e2e-eaas-ocp421.yaml).
-RHOAI_E2E_EAAS_ITS_NAME = "rhoai-e2e-eaas-ocp421"
+# Canonical EPHC ITS (its-rhoai-e2e-ephc-ocp421.yaml).
+RHOAI_E2E_EPHC_ITS_NAME = "rhoai-e2e-ephc-ocp421"
 # External rh-nightly-pm cluster ITS (its-rhoai-e2e-rh-nightly-pm-ocp420.yaml).
 RHOAI_E2E_RH_NIGHTLY_ITS_NAME = "rhoai-e2e-rh-nightly-pm-ocp420"
 # Retired IntegrationTestScenario names on testops-playpen; Konflux starts one PipelineRun per ITS
@@ -17,7 +17,6 @@ RHOAI_E2E_RH_NIGHTLY_ITS_NAME = "rhoai-e2e-rh-nightly-pm-ocp420"
 _STALE_TESTOPS_PLAYPEN_ITS_FALLBACK = frozenset(
     (
         "odh-olminstall-testops",
-        "odh-olminstall-testops-eaas",
         "odh-olminstall-testops-rh-nightly",
         "odh-olminstall-smoke-testops",
         "rhoai-test",
@@ -46,10 +45,23 @@ def _load_stale_testops_playpen_its_names() -> frozenset[str]:
 
 
 STALE_TESTOPS_PLAYPEN_ITS_NAMES: frozenset[str] = _load_stale_testops_playpen_its_names()
-# ``existing``: skip FBC catalog auto-pick; SNAPSHOT omits containerImage unless ``--image`` is set;
-# extract-fbcf-image writes ``n/a``. Use ``--product rhoai`` or ``odh`` for full installs.
-DEFAULT_PRODUCT = "existing"
-PRODUCT_CHOICES = ("existing", "rhoai", "odh")
+# Empty ``PRODUCT``: test-only on external cluster (skip EPHC/install/FBC extract).
+# ``rhoai`` / ``odh``: full install path (EPHC or external + operator install).
+DEFAULT_PRODUCT = ""
+DEFAULT_QUAY_PULL_SECRET_NAME = "rhoai-external-quay-secret"
+PRODUCT_INSTALL_CHOICES = frozenset({"rhoai", "odh"})
+
+
+def normalize_product(product: str) -> str:
+    return (product or "").strip().lower()
+
+
+def product_installs_operator(product: str) -> bool:
+    return normalize_product(product) in PRODUCT_INSTALL_CHOICES
+
+
+def is_test_only_product(product: str) -> bool:
+    return not product_installs_operator(product)
 
 # Tekton label `tekton.dev/pipeline` on PipelineRuns resolved from olminstall-pipeline.yaml.
 OLMINSTALL_PIPELINE_LABEL_CURRENT = "odh-olminstall-test"
@@ -94,7 +106,7 @@ DEFAULT_KONFLUX_SERVER = ""
 # Match olminstall-pipeline.yaml OLMINSTALL_REPO_* defaults (cleanup.sh source).
 DEFAULT_OLMINSTALL_REPO_URL = "https://gitlab.cee.redhat.com/data-hub/olminstall.git"
 DEFAULT_OLMINSTALL_REPO_REVISION = "main"
-# olminstall setup-dependencies.sh args when smoke runs with operator install (Jenkins EaaS / InstallDeps).
+# olminstall setup-dependencies.sh args when smoke runs with operator install (Jenkins EPHC / InstallDeps).
 DEFAULT_SETUP_DEPENDENCIES_ARGS = "-M"
 
 # Must match ``ARTIFACT_BROWSER_URL`` / ``ARTIFACT_BROWSER_REPO_PATH`` defaults in olminstall-pipeline.yaml.
@@ -102,10 +114,11 @@ DEFAULT_ARTIFACT_BROWSER_URL = (
     "https://app-artifact-browser.apps.rosa.konflux-qe.zmr9.p3.openshiftapps.com"
 )
 DEFAULT_ARTIFACT_BROWSER_REPO_PATH = "odh-ci-artifacts"
-# Full-matrix EaaS install + 18-component smoke,bvt exceeds Konflux default 2h (q8qpr).
-DEFAULT_OLMINSTALL_PIPELINE_TIMEOUT = "4h0m0s"
+# Full-matrix --components all smoke is sequential (~12-36m per test-* plus prepare).
+# tgm7k hit 6h at test-codeflare-sdk with llama_stack still queued (PipelineRunTimeout).
+DEFAULT_OLMINSTALL_PIPELINE_TIMEOUT = "9h0m0s"
 # Jenkins resource-lock parity: wait for shared external cluster before install (CLI + pipeline).
-DEFAULT_CLUSTER_IDLE_WAIT_SEC = 4 * 3600 - 300  # slightly under pipeline timeout
+DEFAULT_CLUSTER_IDLE_WAIT_SEC = 6 * 3600 - 300  # shared-cluster idle wait (not the PipelineRun timeout)
 DEFAULT_CLUSTER_IDLE_POLL_SEC = 60
 PENDING_REASONS = {"", "PipelineRunPending", "ResolvingPipelineRef"}
 

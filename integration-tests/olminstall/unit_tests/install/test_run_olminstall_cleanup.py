@@ -13,6 +13,7 @@ from suite.errors import AppError
 
 class RunOlminstallCleanupTest(unittest.TestCase):
     @patch("install.run_olminstall_cleanup._invoke_cleanup")
+    @patch("install.leaked_tenant_namespace_cleanup.cleanup_leaked_tenant_namespaces")
     @patch("components.maas_billing.database.cleanup_maas_tenant_namespace")
     @patch("components.maas_billing.database.cleanup_maas_postgres_infra")
     @patch("components.maas_billing.bbr_pre_processing.cleanup_stale_maas_ingress_workloads")
@@ -21,6 +22,7 @@ class RunOlminstallCleanupTest(unittest.TestCase):
         cleanup_ingress,
         cleanup_postgres,
         cleanup_tenant,
+        cleanup_leaked,
         invoke_cleanup,
     ) -> None:
         cleanup_postgres.side_effect = RuntimeError("namespace stuck")
@@ -35,9 +37,11 @@ class RunOlminstallCleanupTest(unittest.TestCase):
         invoke_cleanup.assert_called_once()
         cleanup_tenant.assert_called_once()
         cleanup_ingress.assert_called_once()
+        cleanup_leaked.assert_called_once()
         self.assertIn("MaaS infra cleanup failed", str(ctx.exception))
 
     @patch("install.run_olminstall_cleanup._invoke_cleanup")
+    @patch("install.leaked_tenant_namespace_cleanup.cleanup_leaked_tenant_namespaces")
     @patch("components.maas_billing.database.cleanup_maas_tenant_namespace")
     @patch("components.maas_billing.database.cleanup_maas_postgres_infra")
     @patch("components.maas_billing.bbr_pre_processing.cleanup_stale_maas_ingress_workloads")
@@ -46,6 +50,7 @@ class RunOlminstallCleanupTest(unittest.TestCase):
         cleanup_ingress,
         cleanup_postgres,
         cleanup_tenant,
+        cleanup_leaked,
         invoke_cleanup,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -58,9 +63,11 @@ class RunOlminstallCleanupTest(unittest.TestCase):
         cleanup_postgres.assert_called_once()
         cleanup_tenant.assert_called_once()
         cleanup_ingress.assert_called_once()
+        cleanup_leaked.assert_called_once()
         invoke_cleanup.assert_called_once()
 
     @patch("install.run_olminstall_cleanup._invoke_cleanup")
+    @patch("install.leaked_tenant_namespace_cleanup.cleanup_leaked_tenant_namespaces")
     @patch("components.maas_billing.database.cleanup_maas_tenant_namespace")
     @patch("components.maas_billing.database.cleanup_maas_postgres_infra")
     @patch("components.maas_billing.bbr_pre_processing.cleanup_stale_maas_ingress_workloads")
@@ -69,6 +76,7 @@ class RunOlminstallCleanupTest(unittest.TestCase):
         cleanup_ingress,
         cleanup_postgres,
         cleanup_tenant,
+        cleanup_leaked,
         invoke_cleanup,
     ) -> None:
         invoke_cleanup.side_effect = AppError("olminstall cleanup.sh failed (exit 1)", 1)
@@ -82,6 +90,7 @@ class RunOlminstallCleanupTest(unittest.TestCase):
                 )
         cleanup_postgres.assert_called_once()
         cleanup_tenant.assert_called_once()
+        cleanup_leaked.assert_called_once()
         invoke_cleanup.assert_called_once()
         self.assertIn("cleanup.sh failed", str(ctx.exception))
 

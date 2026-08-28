@@ -14,7 +14,7 @@ from suite.its_registry import (
     integration_test_scenario_application,
     its_manifest_param,
 )
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS, is_external_cluster_source, ocp_install_prefix
+from suite.its_trigger_params import CLUSTER_SOURCE_EPHC, is_external_cluster_source, ocp_install_prefix
 from suite.pipelinerun_naming import build_olminstall_generate_prefix
 
 
@@ -35,7 +35,6 @@ class RunnerItsAdminMixin:
         self._apply_run_its_manifest_defaults(manifest)
         self._print_effective_trigger_context()
         odh_overrides = self.args.product == "odh"
-        self._apply_run_its_cli_overrides(odh_overrides)
         self._apply_konflux_git_inference_from_clone_or_env()
         items_by_name = {
             item.get("metadata", {}).get("name", ""): item
@@ -43,11 +42,12 @@ class RunnerItsAdminMixin:
             if item.get("metadata", {}).get("name")
         }
         owned_running = self.find_owned_live_watch_pr()
-        self._guard_external_cluster_before_trigger(
+        self._prepare_external_cluster_before_trigger(
             owned_running=owned_running,
             items_by_name=items_by_name,
         )
         self.resolve_image(odh_overrides)
+        self._apply_run_its_cli_overrides(odh_overrides)
         self._pipelinerun_generate_prefix = self._run_its_generate_prefix(manifest)
         print(f"  pipelinerun_prefix={self._pipelinerun_generate_prefix!r}")
         self.create_direct_pipelinerun(odh_overrides)
@@ -85,6 +85,7 @@ class RunnerItsAdminMixin:
     def _apply_run_its_cli_overrides(self, odh_overrides: bool) -> None:
         """Patch staged ITS tmp with CLI cluster/test/install overrides (--run-its only)."""
         if self.its_apply_tmp:
+            self._clear_registry_params_from_staged_its(self.its_apply_tmp)
             self._patch_its_cli_override_params(self.its_apply_tmp, odh_overrides)
 
     def _run_its_generate_prefix(self, manifest: Path) -> str:
@@ -96,10 +97,16 @@ class RunnerItsAdminMixin:
             cluster_label = (
                 self._cluster_label_for_external_secret(cluster_source) if cluster_source else ""
             )
-        elif cluster_source == CLUSTER_SOURCE_EAAS:
-            target_type, cluster_label = "eaas", ""
+        elif cluster_source == CLUSTER_SOURCE_EPHC:
+            target_type, cluster_label = "ephc", ""
         else:
             target_type, cluster_label = "stub", ""
+        if getattr(self.args, "components_explicit", False):
+            components_csv = getattr(self.args, "components", "") or ""
+        else:
+            components_csv = its_manifest_param(manifest, "COMPONENTS") or (
+                getattr(self.args, "components", "") or ""
+            )
         return build_olminstall_generate_prefix(
             product=its_manifest_param(manifest, "PRODUCT") or self.args.product,
             version=its_manifest_param(manifest, "RHOAI_VERSION"),
@@ -107,6 +114,7 @@ class RunnerItsAdminMixin:
             cluster_label=cluster_label,
             target_type=target_type,
             tests_csv=self.args.tests,
+            components_csv=components_csv,
             run_owner=self.run_owner,
         )
 

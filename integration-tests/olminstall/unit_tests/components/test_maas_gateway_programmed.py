@@ -47,7 +47,7 @@ class MaasGatewayProgrammedTest(unittest.TestCase):
         oc_args = oc_run.call_args[0][0]
         self.assertIn("json", oc_args)
 
-    @patch("components.maas_billing.common.cluster_source_is_eaas", return_value=False)
+    @patch("components.maas_billing.common.cluster_source_is_ephc", return_value=False)
     @patch(
         "components.maas_billing.common._maas_gateway_programmed",
         return_value=(False, "Programmed=Unknown"),
@@ -67,7 +67,7 @@ class MaasGatewayProgrammedTest(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("Programmed", reason)
 
-    @patch("components.maas_billing.common.cluster_source_is_eaas", return_value=True)
+    @patch("components.maas_billing.common.cluster_source_is_ephc", return_value=True)
     @patch(
         "components.maas_billing.common._dsc_maas_prerequisites_met",
         return_value=(True, "gateway annotations configured"),
@@ -80,12 +80,12 @@ class MaasGatewayProgrammedTest(unittest.TestCase):
         "components.maas_billing.common._maas_gateway_programmed",
         return_value=(False, "Programmed=Unknown"),
     )
-    def test_eaas_accepts_gateway_when_dsc_prereq_met(self, *_mocks: object) -> None:
+    def test_ephc_accepts_gateway_when_dsc_prereq_met(self, *_mocks: object) -> None:
         ready, reason = _maas_gateway_ready_for_smoke()
         self.assertTrue(ready)
         self.assertIn("DSC MaaSPrerequisitesMet", reason)
 
-    @patch("components.maas_billing.common.cluster_source_is_eaas", return_value=True)
+    @patch("components.maas_billing.common.cluster_source_is_ephc", return_value=True)
     @patch(
         "components.maas_billing.common._maas_gateway_annotations_ready",
         return_value=(True, ""),
@@ -94,12 +94,12 @@ class MaasGatewayProgrammedTest(unittest.TestCase):
         "components.maas_billing.common._maas_gateway_programmed",
         return_value=(False, "Programmed=Unknown"),
     )
-    def test_eaas_accepts_gateway_without_programmed(self, *_mocks: object) -> None:
+    def test_ephc_accepts_gateway_without_programmed(self, *_mocks: object) -> None:
         ready, reason = _maas_gateway_ready_for_smoke()
         self.assertTrue(ready)
-        self.assertIn("EaaS", reason)
+        self.assertIn("EPHC", reason)
 
-    @patch("components.maas_billing.common.cluster_source_is_eaas", return_value=True)
+    @patch("components.maas_billing.common.cluster_source_is_ephc", return_value=True)
     @patch(
         "components.maas_billing.common._maas_gateway_annotations_ready",
         return_value=(True, ""),
@@ -113,7 +113,7 @@ class MaasGatewayProgrammedTest(unittest.TestCase):
     @patch("components.maas_billing.auth._authorino_namespace", return_value="kuadrant-system")
     @patch("install.dependency_operators.maas_dependency_operators_ready", return_value=True)
     @patch("components.maas_billing.common.oc_run")
-    def test_functional_ready_eaas_without_programmed(
+    def test_functional_ready_ephc_without_programmed(
         self,
         oc_run: object,
         *_mocks: object,
@@ -122,6 +122,7 @@ class MaasGatewayProgrammedTest(unittest.TestCase):
         ready, _reason = maas_functional_smoke_ready()
         self.assertTrue(ready)
 
+    @patch("components.maas_billing.common.deps_only_install_dependencies_smoke", return_value=False)
     @patch("components.maas_billing.common._dsc_condition_types", return_value={"MaaSPrerequisitesAvailable"})
     @patch(
         "components.maas_billing.common._dsc_condition",
@@ -143,6 +144,41 @@ class MaasGatewayProgrammedTest(unittest.TestCase):
         acceptable, reason = maas_smoke_acceptable_for_run()
         self.assertTrue(acceptable)
         self.assertEqual(reason, "")
+
+    @patch("components.maas_billing.common.deps_only_install_dependencies_smoke", return_value=False)
+    @patch(
+        "components.maas_billing.common.models_as_service_ready_condition_type",
+        return_value="ModelsAsAServiceReady",
+    )
+    @patch(
+        "components.maas_billing.common._dsc_condition_types",
+        return_value={"ModelsAsAServiceReady", "Ready"},
+    )
+    @patch(
+        "components.maas_billing.common._dsc_condition",
+        side_effect=[
+            ("", "", ""),
+            ("", "", ""),
+            ("True", "Reconciled", "dsc ready"),
+        ],
+    )
+    @patch("install.dependency_operators.maas_dependency_operators_ready", return_value=True)
+    @patch(
+        "components.maas_billing.common.maas_functional_smoke_ready",
+        return_value=(True, ""),
+    )
+    @patch(
+        "components.maas_billing.common._maas_gateway_annotations_ready",
+        return_value=(True, ""),
+    )
+    def test_acceptable_functional_when_models_as_a_service_lagging(
+        self,
+        *_mocks: object,
+    ) -> None:
+        acceptable, reason = maas_smoke_acceptable_for_run()
+        self.assertTrue(acceptable)
+        self.assertIn("functional MaaS ready", reason)
+        self.assertIn("ModelsAsAServiceReady lagging", reason)
 
 
 class MaasGatewayHttpsServiceTest(unittest.TestCase):

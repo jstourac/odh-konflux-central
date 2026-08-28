@@ -73,7 +73,7 @@ def run_ogx_platform_checks() -> list[tuple[str, bool, str]]:
 
 
 def write_ogx_platform_junit(artifacts_dir: Path, *, prefix: str = "ogx-smoke") -> Path:
-    """Write platform-check JUnit used when vector_stores smoke is deselected on EaaS."""
+    """Write platform-check JUnit used when vector_stores smoke is deselected on EPHC."""
     checks = run_ogx_platform_checks()
     failures = sum(1 for _, ok, _ in checks if not ok)
     cases: list[str] = []
@@ -114,7 +114,7 @@ def ensure_ogx_junit_after_pytest(artifacts_dir: Path, *, prefix: str = "ogx-smo
     """Log platform diagnostics when pytest selected nothing; do not fake SUCCESS JUnit.
 
     Jenkins/Konflux parity: empty selection must stay a real failure (unreadable/empty
-    JUnit → component red) on EaaS and external clusters. Optional CRD checks are
+    JUnit → component red) on EPHC and external clusters. Optional CRD checks are
     printed for operators only.
     """
     junit = artifacts_dir / f"{prefix}.xml"

@@ -13,6 +13,8 @@ from _bootstrap import ensure_olminstall_path
 
 ensure_olminstall_path()
 
+from install.gateway_config import wait_gateway_config_ready
+from k8s.jenkins_vault import ensure_runtime_vault_env
 from k8s.shift_left_env import load_shift_left_env_from_mount
 from runners.component_prereqs import prepare_components_for_smoke
 from runners.selection import selected_component_ids
@@ -57,7 +59,8 @@ def _stage_git_core_helpers(source_git: str, bindir: Path) -> Path | None:
 def stage_git_for_prereqs() -> None:
     """Stage ``git`` under tests-payload/.tools/bin for opendatahub-tests pytest steps."""
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_bin_dir
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_bin_dir)
 
     bindir = tests_payload_tools_bin_dir(resolve_tests_payload_root(artifacts))
     bindir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +87,8 @@ def stage_jq_for_prereqs() -> None:
     if shutil.which("jq"):
         return
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_bin_dir
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_bin_dir)
 
     bindir = tests_payload_tools_bin_dir(resolve_tests_payload_root(artifacts))
     bindir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +103,8 @@ def stage_jq_for_prereqs() -> None:
 def stage_oc_for_pytest() -> None:
     """Stage ``oc`` under tests-payload/.tools/bin (not uploaded with JUnit/logs)."""
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_bin_dir
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_bin_dir)
 
     bindir = tests_payload_tools_bin_dir(resolve_tests_payload_root(artifacts))
     bindir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +118,30 @@ def stage_oc_for_pytest() -> None:
     shutil.copy2(source, dest)
     dest.chmod(0o755)
     print(f"✓ Staged oc for pytest at {dest}", flush=True)
+
+
+def prepare_oc_binary_path_for_pytest() -> None:
+    """Stage oc and set OC_BINARY_PATH so opendatahub-tests skips console CLI download.
+
+    Tekton pods often cannot resolve downloads-openshift-console.apps.* on OCI ephemeral
+    guests (*.konflux-ocp-ci.dev). BVT already used this; component smoke must too.
+    """
+    artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
+    os.environ.setdefault("ARTIFACTS_DIR", str(artifacts))
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_bin_dir)
+
+    stage_oc_for_pytest()
+    tools_bin = tests_payload_tools_bin_dir(resolve_tests_payload_root(artifacts))
+    if tools_bin.is_dir():
+        os.environ["PATH"] = f"{tools_bin}:{os.environ.get('PATH', '')}"
+    staged_oc = tools_bin / "oc"
+    if staged_oc.is_file():
+        os.environ["OC_BINARY_PATH"] = str(staged_oc)
+    else:
+        bundled = shutil.which("oc")
+        if bundled:
+            os.environ.setdefault("OC_BINARY_PATH", bundled)
 
 
 def _tool_binary_runs(path: Path) -> bool:
@@ -213,7 +242,8 @@ def _stage_tool_binary(bindir: Path, name: str, *, sources: tuple[str, ...]) -> 
 def stage_which_shim() -> None:
     """Stage a minimal ``which`` for Cypress cy.exec (tenant images often omit it)."""
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_bin_dir
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_bin_dir)
 
     bindir = tests_payload_tools_bin_dir(resolve_tests_payload_root(artifacts))
     bindir.mkdir(parents=True, exist_ok=True)
@@ -246,7 +276,8 @@ def _remove_staged_pyyaml_binaries(target: Path) -> None:
 def stage_cypress_python_tools() -> None:
     """Stage PyYAML under tests-payload for the Cypress image (no pip / dnf as non-root)."""
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_python_dir
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_python_dir)
 
     target = tests_payload_tools_python_dir(resolve_tests_payload_root(artifacts))
     if _pyyaml_staged(target):
@@ -275,7 +306,8 @@ def stage_cypress_python_tools() -> None:
 def stage_cypress_cli_tools() -> None:
     """Stage oc/jq/which for dashboard Cypress (runtime image lacks preinstalled CLI tools)."""
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_bin_dir
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_bin_dir)
 
     bindir = tests_payload_tools_bin_dir(resolve_tests_payload_root(artifacts))
     bindir.mkdir(parents=True, exist_ok=True)
@@ -289,7 +321,16 @@ def prepare_cluster_for_components(*, collect_only: bool = False) -> None:
     """Shared prepare work that must not block component tasks on per-component failures."""
     if collect_only:
         return
+    ensure_runtime_vault_env()
     load_shift_left_env_from_mount()
+    # Ensure Kuadrant/RHCL gateway is ready before component tests (especially dashboard_cypress, ogx).
+    # This prevents 503 errors from /v1/health endpoint during Cypress auth checks.
+    if not wait_gateway_config_ready(timeout_sec=300):
+        print(
+            "WARN: GatewayConfig not ready within timeout; component tests may encounter auth failures",
+            file=sys.stderr,
+            flush=True,
+        )
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
     ids = selected_component_ids()
     if ids:
@@ -308,7 +349,8 @@ def prepare_cluster_for_components(*, collect_only: bool = False) -> None:
 
 def main() -> int:
     from steps.cluster_prep_state import clear_cluster_prep_markers
-    from steps.component_prep_track import component_prep_log_prefix, record_component_prep_track
+    from steps.component_prep_track import (component_prep_log_prefix,
+                                            record_component_prep_track)
 
     prefix = component_prep_log_prefix()
     track = record_component_prep_track()

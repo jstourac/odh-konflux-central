@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import install.ldap as _ldap
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
+from suite.its_trigger_params import CLUSTER_SOURCE_EPHC
 
 
 def _ensure_pyyaml_available() -> None:
@@ -103,19 +103,20 @@ def _htpasswd_test_user_from_env() -> dict[str, str] | None:
     return {"AUTH_TYPE": idp, "USERNAME": username, "PASSWORD": password}
 
 
-def _cluster_source_is_eaas(*, odh_dashboard_url: str = "") -> bool:
-    if os.environ.get("CLUSTER_SOURCE", "").strip() == CLUSTER_SOURCE_EAAS:
+def _cluster_source_is_ephc(*, odh_dashboard_url: str = "") -> bool:
+    if os.environ.get("CLUSTER_SOURCE", "").strip() == CLUSTER_SOURCE_EPHC:
         return True
     url = (
         odh_dashboard_url
         or os.environ.get("ODH_DASHBOARD_URL", "").strip()
         or os.environ.get("BASE_URL", "").strip()
     )
-    return "konfluxeaas.com" in url.lower()
+    host = url.lower()
+    return "konflux-ocp-ci.dev" in host
 
 
-def _eaas_vault_ldap_test_user(vault_doc: dict[str, object]) -> dict[str, str] | None:
-    """LDAP TEST_USER from vault YAML or flat env (Jenkins createIDP / MaaS EaaS parity)."""
+def _ephc_vault_ldap_test_user(vault_doc: dict[str, object]) -> dict[str, str] | None:
+    """LDAP TEST_USER from vault YAML or flat env (Jenkins createIDP / MaaS EPHC parity)."""
     top = vault_doc.get("TEST_USER")
     if isinstance(top, dict):
         auth_type = str(top.get("AUTH_TYPE") or "ldap").strip()
@@ -132,14 +133,14 @@ def _eaas_vault_ldap_test_user(vault_doc: dict[str, object]) -> dict[str, str] |
     return None
 
 
-def _eaas_gateway_auth_overlay(
+def _ephc_gateway_auth_overlay(
     vault_doc: dict[str, object],
     cluster_label: str,
     *,
     odh_dashboard_url: str,
 ) -> dict[str, object]:
-    """Konflux EaaS after Jenkins createIDP: vault htpasswd or LDAP (no OAuth IdP on HCP)."""
-    if not _cluster_source_is_eaas(odh_dashboard_url=odh_dashboard_url) or _ldap._cluster_is_byoidc():
+    """Konflux EPHC after Jenkins createIDP: vault htpasswd or LDAP (no OAuth IdP on HCP)."""
+    if not _cluster_source_is_ephc(odh_dashboard_url=odh_dashboard_url) or _ldap._cluster_is_byoidc():
         return {}
     if _ldap.cluster_has_htpasswd_identity():
         return {}
@@ -158,7 +159,7 @@ def _eaas_gateway_auth_overlay(
         _patch_secondary_users_for_htpasswd(overlay, vault_doc, entry, htpasswd_user)
         return overlay
 
-    ldap_user = _eaas_vault_ldap_test_user(vault_doc)
+    ldap_user = _ephc_vault_ldap_test_user(vault_doc)
     if ldap_user:
         return {
             "CLUSTER_AUTH": "",
@@ -238,8 +239,8 @@ def _pooled_psi_ldap_auth_overlay(
 
 
 def _byoidc_cypress_poll_settings() -> tuple[int, float]:
-    """EaaS BYOIDC credentials can lag gateway Ready (gateway_config waits up to ~6m)."""
-    if os.environ.get("CLUSTER_SOURCE", "").strip() == CLUSTER_SOURCE_EAAS:
+    """EPHC BYOIDC credentials can lag gateway Ready (gateway_config waits up to ~6m)."""
+    if os.environ.get("CLUSTER_SOURCE", "").strip() == CLUSTER_SOURCE_EPHC:
         return 24, 15.0
     return 6, 5.0
 
@@ -249,7 +250,7 @@ def _resolve_byoidc_cypress_test_user(
     retries: int | None = None,
     delay_sec: float | None = None,
 ) -> dict[str, str] | None:
-    """Poll ``oidc/byoidc-credentials`` — EaaS clusters may expose the secret shortly after gateway prep."""
+    """Poll ``oidc/byoidc-credentials`` — EPHC clusters may expose the secret shortly after gateway prep."""
     from components.maas_billing.oidc_users import byoidc_cypress_test_user
 
     default_retries, default_delay = _byoidc_cypress_poll_settings()
@@ -336,7 +337,7 @@ def resolve_gateway_auth_overlay(
         isinstance(top_user, dict) and str(top_user.get("AUTH_TYPE") or "").startswith("oidc")
     )
     if not uses_oidc:
-        return _eaas_gateway_auth_overlay(vault_doc, cluster_label, odh_dashboard_url=odh_dashboard_url)
+        return _ephc_gateway_auth_overlay(vault_doc, cluster_label, odh_dashboard_url=odh_dashboard_url)
     if gateway_use_byoidc_auth(odh_dashboard_url=odh_dashboard_url):
         return {}
     htpasswd_user = _htpasswd_test_user_from_env()
@@ -345,13 +346,13 @@ def resolve_gateway_auth_overlay(
         or (cluster_label or "").startswith("ods-qe")
         or _is_rosa_hcp_dashboard_url(odh_dashboard_url)
         or (
-            _cluster_source_is_eaas(odh_dashboard_url=odh_dashboard_url)
+            _cluster_source_is_ephc(odh_dashboard_url=odh_dashboard_url)
             and _ldap._openldap_secret_ready()
         )
     ):
         htpasswd_user = _htpasswd_test_user_from_vault(vault_doc)
     if not htpasswd_user:
-        return _eaas_gateway_auth_overlay(
+        return _ephc_gateway_auth_overlay(
             vault_doc, cluster_label, odh_dashboard_url=odh_dashboard_url
         )
     idp = str(htpasswd_user.get("AUTH_TYPE") or "htpasswd-cluster-admin").strip()
@@ -466,7 +467,7 @@ def validate_gateway_cypress_auth(*, odh_dashboard_url: str) -> int | None:
         ).strip()
         if not token:
             print(
-                "ERROR: Konflux EaaS gateway Cypress requires OC bearer token "
+                "ERROR: Konflux EPHC gateway Cypress requires OC bearer token "
                 "(HostedCluster VAP blocks OAuth htpasswd/LDAP IdP)",
                 file=sys.stderr,
             )
@@ -493,7 +494,7 @@ def validate_gateway_cypress_auth(*, odh_dashboard_url: str) -> int | None:
         return 2
     if not auth_type and not cluster_auth and not _ldap.cluster_has_htpasswd_identity():
         if (
-            _cluster_source_is_eaas(odh_dashboard_url=odh_dashboard_url)
+            _cluster_source_is_ephc(odh_dashboard_url=odh_dashboard_url)
             and _ldap._openldap_secret_ready()
             and os.environ.get("TEST_USER_USERNAME", "").strip()
         ):
@@ -681,26 +682,26 @@ def dashboard_url_is_local(url: str) -> bool:
     return bool(url) and ("127.0.0.1" in url or "localhost" in url)
 
 
-def is_konflux_eaas_gateway_url(url: str) -> bool:
-    """True for rh-ai console links on Konflux-provisioned HyperShift clusters."""
-    host = url.lower()
-    return "konfluxeaas.com" in host
+def is_konflux_oci_ephemeral_gateway_url(url: str) -> bool:
+    """True for OpenShift CI HyperShift guests (``*.prod.konflux-ocp-ci.dev``)."""
+    return "konflux-ocp-ci.dev" in url.lower()
 
 
 def gateway_cypress_uses_bearer_bypass(*, odh_dashboard_url: str) -> bool:
-    """Local port-forward or EaaS HCP without OAuth login IdP: kube bearer + ci-auth-bypass.
+    """Local port-forward or EPHC HCP without OAuth login IdP: kube bearer + ci-auth-bypass.
 
-    createIDP may stage ``openldap/openldap`` on HostedCluster EaaS, but VAP still blocks
+    createIDP may stage ``openldap/openldap`` on HostedCluster EPHC, but VAP still blocks
     OAuth identityProvider patches — vault htpasswd browser login then fails (401). Only
     leave bearer when LDAP/htpasswd is actually registered on cluster OAuth.
+
+    OpenShift CI guests (``konflux-ocp-ci.dev``) still send Electron to hosted-mgmt2
+    ``/login`` when htpasswd overlay is set (ctcml 401). Always use kube bearer there.
     """
     if dashboard_url_is_local(odh_dashboard_url):
         return True
     if _ldap._cluster_is_byoidc():
         return False
-    if is_konflux_eaas_gateway_url(odh_dashboard_url):
-        if _ldap.cluster_has_ldap_identity() or _ldap.cluster_has_htpasswd_identity():
-            return False
+    if is_konflux_oci_ephemeral_gateway_url(odh_dashboard_url):
         return True
     return False
 

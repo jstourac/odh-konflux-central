@@ -20,7 +20,7 @@ spec:
     description: workbench-images-tests Playwright image
   - name: PRODUCT
     type: string
-    default: existing
+    default: ''
   - name: CLUSTER_SOURCE
     type: string
     default: ''
@@ -38,7 +38,7 @@ spec:
     default: ''
   - name: COMPONENT_VAULT_SECRET
     type: string
-    default: unused-component-vault-secret
+    default: vault-approle
   - name: ARTIFACT_BROWSER_URL
     type: string
   - name: ARTIFACT_BROWSER_REPO_PATH
@@ -53,15 +53,30 @@ spec:
   - name: TASK_MESSAGE
     description: Pass/fail summary for Konflux task Results panel
   volumes:
-  - name: component-vault-credentials
+  - name: vault-approle
+    secret:
+      secretName: vault-approle
+      optional: true
+  - name: tenant-test-secrets
     secret:
       optional: true
       secretName: $(params.COMPONENT_VAULT_SECRET)
+  - name: component-vault-credentials
+    emptyDir: {}
   steps:
   - name: orchestrate-playwright-test
     displayName: Prepare Playwright test run
     onError: continue
     image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
+    volumeMounts:
+    - name: vault-approle
+      mountPath: /vault-approle
+      readOnly: true
+    - name: tenant-test-secrets
+      mountPath: /tenant-test-secrets
+      readOnly: true
+    - name: component-vault-credentials
+      mountPath: /component-vault-credentials
     env:
     - name: KUBECONFIG
       value: $(workspaces.tests-shared.path)/credentials/kubeconfig
@@ -102,9 +117,14 @@ spec:
         memory: 4Gi
         cpu: '1'
     volumeMounts:
+    - name: vault-approle
+      mountPath: /vault-approle
+      readOnly: true
+    - name: tenant-test-secrets
+      mountPath: /tenant-test-secrets
+      readOnly: true
     - name: component-vault-credentials
       mountPath: /component-vault-credentials
-      readOnly: true
     env:
     - name: KUBECONFIG
       value: $(workspaces.tests-shared.path)/credentials/kubeconfig
@@ -116,22 +136,32 @@ spec:
       value: $(params.COMPONENT_TEST_TIMEOUT)
     - name: CI
       value: 'true'
-    script: "#!/usr/bin/env bash\nset -euo pipefail\nARTIFACTS=\"${ARTIFACTS_DIR:-/artifacts}\"\nENVFILE=\"${ARTIFACTS}/component-golang-${COMPONENT_ID}.env\"\
-      \nif [ ! -f \"$ENVFILE\" ]; then\n  echo \"ERROR: missing $ENVFILE (orchestrate step did not run)\" >&2\n  exit 2\n\
-      fi\n# shellcheck disable=SC1090\nsource \"$ENVFILE\"\nif [ \"${SKIP:-false}\" = \"true\" ]; then\n  echo \"SKIP playwright\
-      \ tests (orchestrate marked skip)\"\n  exit 0\nfi\nmkdir -p \"${WORKING_DIR}/.kube\"\ncp \"$KUBECONFIG\" \"${WORKING_DIR}/.kube/config\"\
-      \nexport KUBECONFIG=\"${WORKING_DIR}/.kube/config\"\ncd \"$WORKING_DIR\"\nif [ -d /component-vault-credentials ]; then\n\
-      \  for f in /component-vault-credentials/*; do\n    [ -f \"$f\" ] || continue\n    key=\"$(basename \"$f\")\"\n    [\
-      \ \"$key\" = \"AWS_CA_BUNDLE\" ] && continue\n    if [ -z \"${!key:-}\" ]; then\n      export \"$key=$(tr -d '\\n' <\
-      \ \"$f\")\"\n    fi\n  done\nfi\nexport KUBECONFIG=\"${WORKING_DIR}/.kube/config\"\nunset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT\
-      \ KUBERNETES_PORT \\\n  KUBERNETES_PORT_443_TCP KUBERNETES_PORT_443_TCP_ADDR KUBERNETES_PORT_443_TCP_PORT \\\n  KUBERNETES_PORT_443_TCP_PROTO\
-      \ || true\necho \"Running (playwright): ${RUN_COMMAND}\"\nset +e\nif [ -n \"${TEST_TIMEOUT_SEC:-}\" ]; then\n  timeout\
-      \ \"${TEST_TIMEOUT_SEC}s\" bash -c \"${RUN_COMMAND}\"\nelse\n  eval \"${RUN_COMMAND}\"\nfi\nec=$?\nset -e\nfound=\n\
-      while IFS= read -r -d '' f; do\n  cp \"$f\" \"${ARTIFACTS}/${ARTIFACT_PREFIX}.xml\"\n  found=1\n  break\ndone < <(find\
-      \ \"$RESULTS_DIR\" -name '*unit*.xml' -print0 2>/dev/null || true)\nif [ -z \"$found\" ]; then\n  while IFS= read -r\
-      \ -d '' f; do\n    cp \"$f\" \"${ARTIFACTS}/${ARTIFACT_PREFIX}.xml\"\n    found=1\n    break\n  done < <(find \"$RESULTS_DIR\"\
-      \ -name 'junit.xml' -print0 2>/dev/null || true)\nfi\nif [ -z \"$found\" ]; then\n  echo \"WARN: no JUnit under ${RESULTS_DIR}\"\
-      \ >&2\nfi\necho \"$ec\" > \"${ARTIFACTS}/component-test.exit\"\nexit \"$ec\"\n"
+    script: "#!/usr/bin/env bash\nset -euo pipefail\nARTIFACTS=\"${ARTIFACTS_DIR:-/artifacts}\"\nmkdir -p \"$ARTIFACTS\"\n\
+      ENVFILE=\"${ARTIFACTS}/component-golang-${COMPONENT_ID}.env\"\nif [ ! -f \"$ENVFILE\" ]; then\n  echo \"ERROR: missing\
+      \ $ENVFILE (orchestrate step did not run)\" >&2\n  PFX=\"${ARTIFACT_PREFIX:-${COMPONENT_ID}-smoke}\"\n  printf '<?xml\
+      \ version=\"1.0\" encoding=\"utf-8\"?>\\n<testsuite name=\"%s\" tests=\"1\" failures=\"1\"><testcase classname=\"%s\"\
+      \ name=\"orchestration_failure\"><failure message=\"Missing orchestration env file\"/></testcase></testsuite>\\n' \\\
+      \n    \"${COMPONENT_ID}\" \"${COMPONENT_ID}\" > \"${ARTIFACTS}/${PFX}.xml\"\n  echo \"2\" > \"${ARTIFACTS}/component-test.exit\"\
+      \n  exit 2\nfi\n# shellcheck disable=SC1090\nsource \"$ENVFILE\"\nif [ \"${SKIP:-false}\" = \"true\" ]; then\n  echo\
+      \ \"SKIP playwright tests (orchestrate marked skip)\"\n  exit 0\nfi\nmkdir -p \"${WORKING_DIR}/.kube\"\ncp \"$KUBECONFIG\"\
+      \ \"${WORKING_DIR}/.kube/config\"\nexport KUBECONFIG=\"${WORKING_DIR}/.kube/config\"\ncd \"$WORKING_DIR\"\nif [ -d /component-vault-credentials\
+      \ ]; then\n  for f in /component-vault-credentials/*; do\n    [ -f \"$f\" ] || continue\n    key=\"$(basename \"$f\"\
+      )\"\n    [ \"$key\" = \"AWS_CA_BUNDLE\" ] && continue\n    if [ -z \"${!key:-}\" ]; then\n      export \"$key=$(tr -d\
+      \ '\\n' < \"$f\")\"\n    fi\n  done\nfi\nexport KUBECONFIG=\"${WORKING_DIR}/.kube/config\"\nunset KUBERNETES_SERVICE_HOST\
+      \ KUBERNETES_SERVICE_PORT KUBERNETES_PORT \\\n  KUBERNETES_PORT_443_TCP KUBERNETES_PORT_443_TCP_ADDR KUBERNETES_PORT_443_TCP_PORT\
+      \ \\\n  KUBERNETES_PORT_443_TCP_PROTO || true\necho \"Running (playwright): ${RUN_COMMAND}\"\nset +e\nif [ -n \"${TEST_TIMEOUT_SEC:-}\"\
+      \ ]; then\n  timeout \"${TEST_TIMEOUT_SEC}s\" bash -c \"${RUN_COMMAND}\"\nelse\n  eval \"${RUN_COMMAND}\"\nfi\nec=$?\n\
+      set -e\nfound=\nwhile IFS= read -r -d '' f; do\n  cp \"$f\" \"${ARTIFACTS}/${ARTIFACT_PREFIX}.xml\"\n  found=1\n  break\n\
+      done < <(find \"$RESULTS_DIR\" -name '*unit*.xml' -print0 2>/dev/null || true)\nif [ -z \"$found\" ]; then\n  while\
+      \ IFS= read -r -d '' f; do\n    cp \"$f\" \"${ARTIFACTS}/${ARTIFACT_PREFIX}.xml\"\n    found=1\n    break\n  done <\
+      \ <(find \"$RESULTS_DIR\" -name 'junit.xml' -print0 2>/dev/null || true)\nfi\nif [ -z \"$found\" ]; then\n  if [ \"\
+      $ec\" -ne 0 ]; then\n    echo \"WARN: no JUnit under ${RESULTS_DIR}; writing synthetic failure\" >&2\n    PFX=\"${ARTIFACT_PREFIX:-${COMPONENT_ID}-smoke}\"\
+      \n    printf '<?xml version=\"1.0\" encoding=\"utf-8\"?>\\n<testsuite name=\"%s\" tests=\"1\" failures=\"1\" errors=\"\
+      0\" skipped=\"0\" time=\"0\">\\n  <testcase classname=\"%s\" name=\"execution_failure\" time=\"0\">\\n    <failure message=\"\
+      Component tests failed with exit %s (no JUnit produced)\">\\n      Check console logs for details.\\n    </failure>\\\
+      n  </testcase>\\n</testsuite>\\n' \"${COMPONENT_ID}\" \"${COMPONENT_ID}\" \"$ec\" > \"${ARTIFACTS}/${PFX}.xml\"\n  else\n\
+      \    echo \"WARN: no JUnit under ${RESULTS_DIR}\" >&2\n  fi\nfi\necho \"$ec\" > \"${ARTIFACTS}/component-test.exit\"\
+      \nexit \"$ec\"\n"
   - name: summarize-component-results
     displayName: Summarize this component
     onError: continue

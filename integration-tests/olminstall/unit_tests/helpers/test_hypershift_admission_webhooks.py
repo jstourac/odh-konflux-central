@@ -28,7 +28,7 @@ def _vwc(*, name: str, svc_name: str, svc_ns: str = "default") -> dict:
 
 
 class HypershiftAdmissionWebhooksTest(unittest.TestCase):
-    @patch("install.gateway_config.cluster_source_is_eaas", return_value=True)
+    @patch("install.gateway_config.cluster_source_is_ephc", return_value=True)
     @patch(
         "install.rosa_hcp_pull_setup.is_hypershift_managed_cluster",
         return_value=True,
@@ -63,7 +63,7 @@ class HypershiftAdmissionWebhooksTest(unittest.TestCase):
         self.assertEqual(len(delete_calls), 1)
         self.assertEqual(delete_calls[0].args[0][2], "hypershift-block")
 
-    @patch("install.gateway_config.cluster_source_is_eaas", return_value=False)
+    @patch("install.gateway_config.cluster_source_is_ephc", return_value=False)
     @patch(
         "install.rosa_hcp_pull_setup.is_hypershift_managed_cluster",
         return_value=False,
@@ -77,7 +77,7 @@ class HypershiftAdmissionWebhooksTest(unittest.TestCase):
         self.assertEqual(neutralize_broken_hypershift_admission_webhooks(), 0)
         oc_run.assert_not_called()
 
-    @patch("install.gateway_config.cluster_source_is_eaas", return_value=True)
+    @patch("install.gateway_config.cluster_source_is_ephc", return_value=True)
     @patch(
         "install.rosa_hcp_pull_setup.is_hypershift_managed_cluster",
         return_value=True,
@@ -104,7 +104,7 @@ class HypershiftAdmissionWebhooksTest(unittest.TestCase):
         self.assertIn("broken HyperShift admission webhook", reason)
         self.assertIn("xxx-invalid-service-xxx", reason)
 
-    @patch("install.gateway_config.cluster_source_is_eaas", return_value=True)
+    @patch("install.gateway_config.cluster_source_is_ephc", return_value=True)
     @patch(
         "install.rosa_hcp_pull_setup.is_hypershift_managed_cluster",
         return_value=True,

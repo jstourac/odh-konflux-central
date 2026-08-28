@@ -20,7 +20,7 @@ spec:
       name: application
   params:
     - name: CLUSTER_SOURCE
-      value: "EAAS"
+      value: "EPHC"
     - name: OCP_VERSION
       value: "latest (default)"
     - name: PRODUCT
@@ -51,6 +51,6 @@ spec:
       - name: revision
         value: main
       - name: pathInRepo
-        value: integration-tests/olminstall/tekton/pipelines/olminstall-pipelinerun.yaml
+        value: integration-tests/olminstall/tekton/pipelines/olminstall-pipelinerun-ephc.yaml
     resolver: git
     resourceKind: pipelinerun

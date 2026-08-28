@@ -13,6 +13,7 @@ ensure_olminstall_path()
 
 from components.dashboard_cypress.verify_route import verify_dashboard_route_for_prepare
 from components.dashboard_cypress.runtime import log_gateway_auth_stack_warnings
+from suite.constants import is_test_only_product
 from steps.tests_payload import ensure_tests_payload_layout, resolve_tests_payload_root
 
 _SKIP_MARKER = ".skip-verify-operator-ready"
@@ -42,8 +43,8 @@ def _dsc_crd_available() -> bool:
 
 
 def _skip_dashboard_verify_reason() -> str | None:
-    """Skip Jenkins dashboard gate for deps-only existing-cluster smoke (e.g. model_server)."""
-    if os.environ.get("PRODUCT", "").strip().lower() != "existing":
+    """Skip Jenkins dashboard gate for deps-only test-only cluster smoke (e.g. model_server)."""
+    if not is_test_only_product(os.environ.get("PRODUCT", "")):
         return None
     component_ids = _selected_component_ids()
     if "dashboard_cypress" in component_ids:
@@ -53,7 +54,7 @@ def _skip_dashboard_verify_reason() -> str | None:
     )
     if install_dependencies and component_ids:
         return (
-            "PRODUCT=existing with install-dependencies and no dashboard_cypress "
+            "test-only PRODUCT with install-dependencies and no dashboard_cypress "
             f"in COMPONENTS_CSV ({','.join(sorted(component_ids))})"
         )
     if component_ids and not _dsc_crd_available():

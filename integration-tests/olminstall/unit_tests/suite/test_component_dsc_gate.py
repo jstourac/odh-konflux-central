@@ -9,6 +9,7 @@ from unittest.mock import patch
 from suite.component_dsc_gate import (
     dsc_disabled_reason_from_states,
     llama_stack_smoke_prereq_reason_from_states,
+    smoke_component_dsc_disabled,
     smoke_component_prereq_reason_from_states,
     smoke_component_prereq_unavailable,
     wait_for_smoke_dsc_ready_after_patch,
@@ -28,8 +29,21 @@ class DscDisabledReasonTest(unittest.TestCase):
             "maas_billing",
             management_states={"kserve": "Managed"},
             models_as_service_state="Removed",
+            operator_version="3.4.0",
         )
         self.assertEqual(reason, "spec.components.kserve.modelsAsService.managementState=Removed")
+
+    def test_maas_billing_removed_via_aigateway_models_as_a_service_on_35(self) -> None:
+        reason = dsc_disabled_reason_from_states(
+            "maas_billing",
+            management_states={"kserve": "Managed", "aigateway": "Managed"},
+            models_as_service_state="Removed",
+            operator_version="3.5.0",
+        )
+        self.assertEqual(
+            reason,
+            "spec.components.aigateway.modelsAsAService.managementState=Removed",
+        )
 
     def test_maas_billing_enabled(self) -> None:
         reason = dsc_disabled_reason_from_states(
@@ -137,6 +151,26 @@ class ClusterApiPrereqTest(unittest.TestCase):
         mock_disabled.assert_not_called()
 
 
+class SmokeComponentDscDisabledTest(unittest.TestCase):
+    @patch("suite.component_dsc_gate._models_as_service_management_state", return_value="Removed")
+    @patch("suite.component_dsc_gate.components_need_models_as_service", return_value=True)
+    @patch("suite.component_dsc_gate._dsc_smoke_managed_components", return_value=[])
+    @patch("suite.component_dsc_gate._resolve_operator_version_for_dsc", return_value="3.4.0")
+    @patch("suite.component_dsc_gate.oc_run")
+    def test_maas_removed_returns_tuple(
+        self,
+        oc_run,
+        _version,
+        _keys,
+        _needs_maas,
+        _maas_state,
+    ) -> None:
+        oc_run.return_value = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        disabled, reason = smoke_component_dsc_disabled("maas_billing")
+        self.assertTrue(disabled)
+        self.assertIn("modelsAsService.managementState=Removed", reason)
+
+
 class WaitForSmokeDscReadyTest(unittest.TestCase):
     @patch("suite.component_dsc_gate._dsc_condition_types", return_value=["WorkbenchesReady"])
     @patch("suite.component_dsc_gate._dsc_condition", side_effect=[("True", "Reconciled", "")])
@@ -206,6 +240,52 @@ class WaitForSmokeDscReadyTest(unittest.TestCase):
         called_types = {call.args[0] for call in cond.call_args_list}
         self.assertNotIn("ModelsAsServiceReady", called_types)
         self.assertIn("KserveReady", called_types)
+
+    @patch("suite.component_dsc_gate._dsc_smoke_managed_components", return_value={"ogx"})
+    @patch("suite.component_dsc_gate._dsc_condition_types", return_value=["OGXReady"])
+    @patch("suite.component_dsc_gate._dsc_condition")
+    @patch("suite.component_dsc_gate.time.sleep")
+    def test_batch_wait_fails_fast_when_ogx_reason_error(
+        self,
+        sleep,
+        cond,
+        _types,
+        _keys,
+    ) -> None:
+        from suite.component_dsc_gate import wait_for_smoke_dsc_ready_batch
+
+        cond.return_value = (
+            "False",
+            "Error",
+            "LlamaStackOperator is set to Managed, it has been deprecated, please set it to Removed",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            wait_for_smoke_dsc_ready_batch({"ogx"}, timeout_sec=600)
+        self.assertIn("OGXReady", str(ctx.exception))
+        self.assertIn("Error", str(ctx.exception))
+        sleep.assert_not_called()
+
+    @patch("suite.component_dsc_gate._dsc_smoke_managed_components", return_value={"workbenches"})
+    @patch("suite.component_dsc_gate._dsc_condition_types", return_value=["WorkbenchesReady"])
+    @patch("suite.component_dsc_gate._dsc_condition")
+    def test_wait_succeeds_if_ready_on_timeout_recheck(self, cond, _types, _keys) -> None:
+        clock_t = {"t": 1_000.0}
+
+        def fake_time() -> float:
+            return clock_t["t"]
+
+        def fake_sleep(seconds: float) -> None:
+            clock_t["t"] += seconds
+
+        def fake_cond(_name: str) -> tuple[str, str, str]:
+            if clock_t["t"] >= 1_005.0:
+                return ("True", "Reconciled", "")
+            return ("False", "DeploymentsNotReady", "0/1 deployments ready")
+
+        cond.side_effect = fake_cond
+        with patch("suite.component_dsc_gate.time.time", fake_time):
+            with patch("suite.component_dsc_gate.time.sleep", fake_sleep):
+                wait_for_smoke_dsc_ready_after_patch("workbenches", timeout_sec=5)
 
     @patch("suite.component_dsc_gate.smoke_component_dsc_disabled", return_value=(False, ""))
     @patch("components.maas_billing.common.maas_functional_smoke_ready", return_value=(True, ""))

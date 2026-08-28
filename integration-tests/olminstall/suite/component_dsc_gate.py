@@ -12,6 +12,7 @@ from install.dsc_install import (
     _resolve_operator_version_for_dsc,
     components_need_models_as_service,
     oc_run,
+    uses_aigateway_models_as_a_service,
 )
 from install.llama_stack_deps import _LLAMA_STACK_CRD, llama_stack_crd_present
 from suite.cluster_api_health import (
@@ -19,7 +20,11 @@ from suite.cluster_api_health import (
     cluster_smoke_infra_blocked_reason,
 )
 from suite.errors import AppError
-from components.maas_billing.common import _dsc_condition_types, _maas_smoke_ready
+from components.maas_billing.common import (
+    _dsc_condition_types,
+    _maas_smoke_ready,
+    models_as_service_ready_condition_type,
+)
 
 # Primary Ready condition per smoke catalog id (status.conditions[].reason == Removed).
 _SMOKE_READY_CONDITION: dict[str, str] = {
@@ -39,6 +44,7 @@ _SMOKE_READY_CONDITION: dict[str, str] = {
     "spark_operator": "SparkOperatorReady",
     "codeflare_sdk": "RayReady",
     "ogx": "OGXReady",
+    "platform": "DashboardReady",
 }
 
 _DSC_KEY_READY_CONDITION: dict[str, str] = {
@@ -60,11 +66,22 @@ _DSC_KEY_READY_CONDITION: dict[str, str] = {
 }
 
 
+def _resolve_smoke_ready_condition(smoke_id: str) -> str:
+    """Map catalog smoke id to the DSC Ready condition type exposed on this cluster."""
+    cond = _SMOKE_READY_CONDITION.get(smoke_id, "")
+    if cond == "ModelsAsServiceReady":
+        resolved = models_as_service_ready_condition_type()
+        if resolved in _dsc_condition_types():
+            return resolved
+        return cond
+    return cond
+
+
 def _ready_conditions_for_smoke(smoke_id: str) -> list[str]:
     """DSC Ready conditions to wait for after patching Managed keys for *smoke_id*."""
     managed = _dsc_smoke_managed_components(smoke_id)
     conditions: list[str] = []
-    primary = _SMOKE_READY_CONDITION.get(smoke_id, "")
+    primary = _resolve_smoke_ready_condition(smoke_id)
     if primary:
         conditions.append(primary)
     for key in sorted(managed):
@@ -86,10 +103,120 @@ def _dsc_condition(condition_type: str) -> tuple[str, str, str]:
         capture_output=True,
         timeout=30,
     )
-    parts = (r.stdout or "").strip().split("\t")
-    while len(parts) < 3:
-        parts.append("")
+    parts = ((r.stdout or "").strip().split("\t") + ["", "", ""])[:3]
     return parts[0], parts[1], parts[2]
+
+
+_DEFAULT_DSC_RECONCILE_WAIT_SEC = 600
+
+
+def _dsc_reconcile_timeout_sec(timeout_sec: int | None) -> int:
+    if timeout_sec is not None:
+        return timeout_sec
+    raw = os.environ.get("OLMINSTALL_DSC_RECONCILE_WAIT_SEC", "").strip()
+    if not raw:
+        return _DEFAULT_DSC_RECONCILE_WAIT_SEC
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"WARN: invalid OLMINSTALL_DSC_RECONCILE_WAIT_SEC={raw!r}; "
+            f"using default {_DEFAULT_DSC_RECONCILE_WAIT_SEC}s",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _DEFAULT_DSC_RECONCILE_WAIT_SEC
+
+
+def _dsc_wait_fail_fast_detail(
+    ready_type: str, status: str, reason: str, msg: str
+) -> str:
+    """Non-empty when polling cannot succeed (terminal operator Error, etc.)."""
+    if status == "True":
+        return ""
+    if reason != "Error":
+        return ""
+    detail = f"{ready_type}={status or '?'} reason={reason}: {(msg or '')[:120]}"
+    if ready_type == "OGXReady" and "LlamaStackOperator" in (msg or ""):
+        return detail
+    if "deprecated" in (msg or "").lower():
+        return detail
+    return ""
+
+
+def _refresh_pending_dsc_ready(pending: set[str]) -> set[str]:
+    return {
+        ready_type
+        for ready_type in pending
+        if _dsc_condition(ready_type)[0] != "True"
+    }
+
+
+def _raise_dsc_wait_timeout(
+    *,
+    label: str,
+    timeout: int,
+    pending: set[str],
+    ready_types: list[str],
+    skipped: set[str] | None = None,
+) -> None:
+    pending = _refresh_pending_dsc_ready(pending)
+    if not pending:
+        satisfied = [c for c in ready_types if not skipped or c not in skipped]
+        if skipped:
+            print(
+                f"✓ DSC ready for {label}: {', '.join(satisfied)} "
+                f"(skipped: {', '.join(sorted(skipped))})",
+                flush=True,
+            )
+        else:
+            print(f"✓ DSC ready for {label}: {', '.join(ready_types)}", flush=True)
+        return
+    details = []
+    for ready_type in sorted(pending):
+        status, reason, msg = _dsc_condition(ready_type)
+        details.append(
+            f"{ready_type} status={status or '?'} reason={reason or '?'}: "
+            f"{(msg or 'reconcile incomplete')[:120]}"
+        )
+    raise RuntimeError(f"DSC not ready for {label} after {timeout}s ({'; '.join(details)})")
+
+
+def _dsc_process_pending_waits(
+    pending: set[str],
+    *,
+    label: str,
+    managed_keys: set[str] | None = None,
+    skipped: set[str] | None = None,
+) -> None:
+    for ready_type in list(pending):
+        status, cond_reason, msg = _dsc_condition(ready_type)
+        fail_fast = _dsc_wait_fail_fast_detail(ready_type, status, cond_reason, msg)
+        if fail_fast:
+            raise RuntimeError(fail_fast)
+        if ready_type in ("ModelsAsServiceReady", "ModelsAsAServiceReady") and cond_reason == "PrerequisitesNotMet":
+            if label == "batch component prep":
+                print(
+                    f"WARN: skipping batch DSC wait for {ready_type} "
+                    f"PrerequisitesNotMet: {(msg or 'infra blocked')[:120]}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"WARN: skipping DSC wait for {label} ({ready_type} "
+                    f"PrerequisitesNotMet: {(msg or 'infra blocked')[:120]})",
+                    flush=True,
+                )
+            pending.discard(ready_type)
+            if skipped is not None:
+                skipped.add(ready_type)
+            continue
+        if (
+            managed_keys is not None
+            and cond_reason == "Removed"
+            and not any(_component_management_state(key) == "Managed" for key in managed_keys)
+        ):
+            raise RuntimeError(f"{ready_type} reason=Removed and DSC not Managed for {label}")
 
 
 def _component_management_state(dsc_key: str) -> str:
@@ -109,13 +236,18 @@ def _component_management_state(dsc_key: str) -> str:
 
 
 def _models_as_service_management_state() -> str:
+    op_ver = _resolve_operator_version_for_dsc()
+    if uses_aigateway_models_as_a_service(op_ver):
+        jsonpath = "{.spec.components.aigateway.modelsAsAService.managementState}"
+    else:
+        jsonpath = "{.spec.components.kserve.modelsAsService.managementState}"
     r = oc_run(
         [
             "get",
             "datasciencecluster",
             "default-dsc",
             "-o",
-            "jsonpath={.spec.components.kserve.modelsAsService.managementState}",
+            f"jsonpath={jsonpath}",
         ],
         check=False,
         capture_output=True,
@@ -124,18 +256,32 @@ def _models_as_service_management_state() -> str:
     return (r.stdout or "").strip()
 
 
+def _models_as_service_removed_reason() -> str:
+    if uses_aigateway_models_as_a_service(_resolve_operator_version_for_dsc()):
+        return "spec.components.aigateway.modelsAsAService.managementState=Removed"
+    return "spec.components.kserve.modelsAsService.managementState=Removed"
+
+
 def dsc_disabled_reason_from_states(
     smoke_id: str,
     *,
     management_states: dict[str, str],
     models_as_service_state: str = "",
     ready_reasons: dict[str, str] | None = None,
+    operator_version: str = "",
 ) -> str:
     """Pure probe for unit tests. Empty string means not disabled."""
     ready_reasons = ready_reasons or {}
-    ready_type = _SMOKE_READY_CONDITION.get(smoke_id, "")
+    ready_type = _resolve_smoke_ready_condition(smoke_id)
     if ready_type and ready_reasons.get(ready_type) == "Removed":
         return f"{ready_type} reason=Removed"
+    legacy_maas = _SMOKE_READY_CONDITION.get(smoke_id, "")
+    if (
+        legacy_maas == "ModelsAsServiceReady"
+        and legacy_maas != ready_type
+        and ready_reasons.get(legacy_maas) == "Removed"
+    ):
+        return f"{legacy_maas} reason=Removed"
 
     for key in _dsc_smoke_managed_components(smoke_id):
         if management_states.get(key) == "Removed":
@@ -143,6 +289,8 @@ def dsc_disabled_reason_from_states(
 
     if components_need_models_as_service({smoke_id}):
         if models_as_service_state == "Removed":
+            if uses_aigateway_models_as_a_service(operator_version):
+                return "spec.components.aigateway.modelsAsAService.managementState=Removed"
             return "spec.components.kserve.modelsAsService.managementState=Removed"
 
     return ""
@@ -157,20 +305,23 @@ def wait_for_smoke_dsc_ready_after_patch(
     ready_types = _ready_conditions_for_smoke(smoke_id)
     if not ready_types:
         return
-    timeout = timeout_sec
-    if timeout is None:
-        timeout = int(os.environ.get("OLMINSTALL_DSC_RECONCILE_WAIT_SEC", "600"))
+    timeout = _dsc_reconcile_timeout_sec(timeout_sec)
     deadline = time.time() + timeout
     managed_keys = _dsc_smoke_managed_components(smoke_id)
     pending = set(ready_types)
+    skipped: set[str] = set()
     while time.time() < deadline:
-        pending = {
-            ready_type
-            for ready_type in pending
-            if _dsc_condition(ready_type)[0] != "True"
-        }
+        pending = _refresh_pending_dsc_ready(pending)
         if not pending:
-            print(f"✓ DSC ready for {smoke_id}: {', '.join(ready_types)}", flush=True)
+            satisfied = [c for c in ready_types if c not in skipped]
+            if skipped:
+                print(
+                    f"✓ DSC ready for {smoke_id}: {', '.join(satisfied)} "
+                    f"(skipped: {', '.join(sorted(skipped))})",
+                    flush=True,
+                )
+            else:
+                print(f"✓ DSC ready for {smoke_id}: {', '.join(ready_types)}", flush=True)
             return
         if int(time.time()) % 60 < 12:
             details = []
@@ -184,38 +335,30 @@ def wait_for_smoke_dsc_ready_after_patch(
                 f"Waiting for DSC ({smoke_id}): {'; '.join(details)}",
                 flush=True,
             )
-        for ready_type in list(pending):
-            status, cond_reason, msg = _dsc_condition(ready_type)
-            if (
-                ready_type == "ModelsAsServiceReady"
-                and cond_reason == "PrerequisitesNotMet"
-            ):
+        _dsc_process_pending_waits(
+            pending,
+            label=smoke_id,
+            managed_keys=managed_keys,
+            skipped=skipped,
+        )
+        if not pending:
+            satisfied = [c for c in ready_types if c not in skipped]
+            if skipped:
                 print(
-                    f"WARN: skipping DSC wait for {smoke_id} ({ready_type} "
-                    f"PrerequisitesNotMet: {(msg or 'infra blocked')[:120]})",
+                    f"✓ DSC ready for {smoke_id}: {', '.join(satisfied)} "
+                    f"(skipped: {', '.join(sorted(skipped))})",
                     flush=True,
                 )
-                pending.discard(ready_type)
-                continue
-            if cond_reason == "Removed" and not any(
-                _component_management_state(key) == "Managed" for key in managed_keys
-            ):
-                raise RuntimeError(
-                    f"{ready_type} reason=Removed and DSC not Managed for {smoke_id}"
-                )
-        if not pending:
-            print(f"✓ DSC ready for {smoke_id}: {', '.join(ready_types)}", flush=True)
+            else:
+                print(f"✓ DSC ready for {smoke_id}: {', '.join(ready_types)}", flush=True)
             return
         time.sleep(12)
-    details = []
-    for ready_type in sorted(pending):
-        status, reason, msg = _dsc_condition(ready_type)
-        details.append(
-            f"{ready_type} status={status or '?'} reason={reason or '?'}: "
-            f"{(msg or 'reconcile incomplete')[:120]}"
-        )
-    raise RuntimeError(
-        f"DSC not ready for {smoke_id} after {timeout}s ({'; '.join(details)})"
+    _raise_dsc_wait_timeout(
+        label=smoke_id,
+        timeout=timeout,
+        pending=pending,
+        ready_types=ready_types,
+        skipped=skipped,
     )
 
 
@@ -237,19 +380,22 @@ def wait_for_smoke_dsc_ready_batch(
     # ModelsAsServiceReady is deferred to maas_billing per-component prep (maas-api wait).
     if not ready_types:
         return
-    timeout = timeout_sec
-    if timeout is None:
-        timeout = int(os.environ.get("OLMINSTALL_DSC_RECONCILE_WAIT_SEC", "600"))
+    timeout = _dsc_reconcile_timeout_sec(timeout_sec)
     deadline = time.time() + timeout
     pending = set(ready_types)
+    skipped: set[str] = set()
     while time.time() < deadline:
-        pending = {
-            ready_type
-            for ready_type in pending
-            if _dsc_condition(ready_type)[0] != "True"
-        }
+        pending = _refresh_pending_dsc_ready(pending)
         if not pending:
-            print(f"✓ DSC ready for batch prep: {', '.join(ready_types)}", flush=True)
+            satisfied = [c for c in ready_types if c not in skipped]
+            if skipped:
+                print(
+                    f"✓ DSC ready for batch prep: {', '.join(satisfied)} "
+                    f"(skipped: {', '.join(sorted(skipped))})",
+                    flush=True,
+                )
+            else:
+                print(f"✓ DSC ready for batch prep: {', '.join(ready_types)}", flush=True)
             return
         if int(time.time()) % 60 < 12:
             details = []
@@ -260,28 +406,25 @@ def wait_for_smoke_dsc_ready_batch(
                     f" ({(msg or 'reconciling...')[:80]})"
                 )
             print(f"Waiting for DSC batch: {'; '.join(details)}", flush=True)
-        for ready_type in list(pending):
-            _, cond_reason, msg = _dsc_condition(ready_type)
-            if ready_type == "ModelsAsServiceReady" and cond_reason == "PrerequisitesNotMet":
+        _dsc_process_pending_waits(pending, label="batch component prep", skipped=skipped)
+        if not pending:
+            satisfied = [c for c in ready_types if c not in skipped]
+            if skipped:
                 print(
-                    f"WARN: skipping batch DSC wait for {ready_type} "
-                    f"PrerequisitesNotMet: {(msg or 'infra blocked')[:120]}",
+                    f"✓ DSC ready for batch prep: {', '.join(satisfied)} "
+                    f"(skipped: {', '.join(sorted(skipped))})",
                     flush=True,
                 )
-                pending.discard(ready_type)
-        if not pending:
-            print(f"✓ DSC ready for batch prep: {', '.join(ready_types)}", flush=True)
+            else:
+                print(f"✓ DSC ready for batch prep: {', '.join(ready_types)}", flush=True)
             return
         time.sleep(12)
-    details = []
-    for ready_type in sorted(pending):
-        status, reason, msg = _dsc_condition(ready_type)
-        details.append(
-            f"{ready_type} status={status or '?'} reason={reason or '?'}: "
-            f"{(msg or 'reconcile incomplete')[:120]}"
-        )
-    raise RuntimeError(
-        f"DSC not ready for batch component prep after {timeout}s ({'; '.join(details)})"
+    _raise_dsc_wait_timeout(
+        label="batch component prep",
+        timeout=timeout,
+        pending=pending,
+        ready_types=ready_types,
+        skipped=skipped,
     )
 
 
@@ -321,7 +464,7 @@ def smoke_component_dsc_disabled(smoke_id: str) -> tuple[bool, str]:
 
     if components_need_models_as_service({smoke_id}):
         if _models_as_service_management_state() == "Removed":
-            return True, "spec.components.kserve.modelsAsService.managementState=Removed"
+            return True, _models_as_service_removed_reason()
 
     return False, ""
 

@@ -57,11 +57,11 @@ class CodeflareSdkDashboardPatchTest(unittest.TestCase):
             self.assertTrue((artifacts / "codeflare_patch_run_tests_dashboard.py").is_file())
             self.assertTrue(out.endswith("bash run-tests.sh -m smoke"))
 
-    def test_combined_patches_eaas_then_dashboard(self) -> None:
+    def test_combined_patches_ephc_then_dashboard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = Path(tmp)
             with mock.patch(
-                "components.codeflare_sdk.dashboard_patch.prepend_codeflare_eaas_kubeconfig_auth",
+                "components.codeflare_sdk.dashboard_patch.prepend_codeflare_ephc_kubeconfig_auth",
                 return_value="export CLUSTER_AUTH=openshift; bash run-tests.sh -m smoke",
             ):
                 out = prepend_codeflare_run_command_patches(

@@ -1,23 +1,23 @@
 ---
-# EaaS smoke slice B: auto on rhoai-fbc-fragment-ocp-422 (pairs with ocp421 = A).
+# EPHC smoke slice B: auto on rhoai-fbc-fragment-ocp-422 (pairs with ocp421 = A).
 # COMPONENTS match playpen-b: dashboard_cypress + platform only.
-# Debug: --run-its rhoai-e2e-eaas-ocp422 --konflux-app testops-playpen
-#   (or --run-its rhoai-e2e-eaas-playpen-b). Enable on FBC only after upstream merge.
+# Debug: --run-its rhoai-e2e-ephc-ocp422 --konflux-app testops-playpen
+#   (or --run-its rhoai-e2e-ephc-playpen-b). Enable on FBC only after upstream merge.
 apiVersion: appstudio.redhat.com/v1beta2
 kind: IntegrationTestScenario
 metadata:
   labels:
     test.appstudio.openshift.io/optional: "true"
-  name: rhoai-e2e-eaas-ocp422
+  name: rhoai-e2e-ephc-ocp422
   namespace: rhoai-tenant
 spec:
   application: rhoai-fbc-fragment-ocp-422
   contexts:
-    - description: RHOAI EaaS smoke slice B when rhoai-fbc-fragment-ocp-422 builds
+    - description: RHOAI EPHC smoke slice B when rhoai-fbc-fragment-ocp-422 builds
       name: component_rhoai-fbc-fragment-ocp-422
   params:
     - name: CLUSTER_SOURCE
-      value: "EAAS"
+      value: "EPHC"
     - name: OCP_VERSION
       value: "latest (default)"
     - name: PRODUCT
@@ -39,7 +39,7 @@ spec:
     - name: COMPONENTS
       value: "dashboard_cypress,platform"
     - name: QUAY_PULL_SECRET_NAME
-      value: "rhoai-quay-secret"
+      value: "rhoai-external-quay-secret"
     - name: SCRIPTS_REPO_URL
       value: https://github.com/opendatahub-io/odh-konflux-central.git
     - name: SCRIPTS_REPO_REVISION
@@ -51,6 +51,6 @@ spec:
       - name: revision
         value: main
       - name: pathInRepo
-        value: integration-tests/olminstall/tekton/pipelines/olminstall-pipelinerun-eaas.yaml
+        value: integration-tests/olminstall/tekton/pipelines/olminstall-pipelinerun-ephc.yaml
     resolver: git
     resourceKind: pipelinerun

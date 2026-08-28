@@ -18,8 +18,8 @@ class ClusterLabelFromSourceTest(unittest.TestCase):
             "nmanos-konflux1",
         )
 
-    def test_eaas_returns_empty(self) -> None:
-        self.assertEqual(cluster_label_from_cluster_source("EAAS"), "")
+    def test_ephc_returns_empty(self) -> None:
+        self.assertEqual(cluster_label_from_cluster_source("EPHC"), "")
 
 class BuildRuntimeMetadataClusterTest(unittest.TestCase):
     @patch("runners.report.pipelinerun_metadata.resolve_artifacts_url_for_ui", return_value="")

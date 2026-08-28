@@ -1,4 +1,4 @@
-"""Reconcile MaaS ingress and wait for DSC Ready before operator_health BVT."""
+"""Reconcile MaaS ingress and wait for DSC+dashboard before operator_health BVT."""
 
 from __future__ import annotations
 
@@ -29,6 +29,9 @@ def prepare_bvt_dsc_ready() -> int:
     repair_payload_pre_processing_selector_conflict()
     try:
         require_dsc_ready_for_bvt(timeout_sec=bvt_dsc_ready_timeout_sec())
+        from steps.prepare_bvt_apps_namespace import wait_dashboard_pods_ready_for_bvt
+
+        wait_dashboard_pods_ready_for_bvt()
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
         return 1

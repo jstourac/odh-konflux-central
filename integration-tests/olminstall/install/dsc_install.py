@@ -14,7 +14,11 @@ from _bootstrap import ensure_olminstall_path
 
 ensure_olminstall_path()
 
-from suite.component_version_gate import probe_operator_version_from_cluster
+from suite.component_version_gate import (
+    probe_operator_version_from_cluster,
+    resolve_operator_version_for_gates,
+    rhoai_version_at_least,
+)
 from install.dsc_install_policy import resolve_managed_dsc_keys
 from k8s.oc_util import run_oc
 
@@ -109,6 +113,7 @@ _DSC_COMPONENT_KEYS = (
     "trainer",
     "aipipelines",
     "kserve",
+    "aigateway",
     "ray",
     "kueue",
     "modelregistry",
@@ -159,8 +164,50 @@ def components_need_models_as_service(component_ids: set[str]) -> bool:
 
 
 def smoke_enables_models_as_service(component_ids: set[str]) -> bool:
-    """DSC patch should enable kserve.modelsAsService for these smoke catalog ids."""
-    return bool(component_ids & {"model_server", "model_runtime", "maas_billing"})
+    """DSC patch should enable MaaS for these smoke catalog ids."""
+    return components_need_models_as_service(component_ids)
+
+
+def _probe_update_channel_from_cluster() -> str:
+    """Best-effort rhods-operator subscription channel (Tekton prep often omits UPDATE_CHANNEL)."""
+    if not os.environ.get("KUBECONFIG", "").strip():
+        return ""
+    op_ns = os.environ.get("OPERATOR_NAMESPACE", "").strip() or "redhat-ods-operator"
+    op_name = (os.environ.get("OPERATOR_NAME", "") or "rhods-operator").strip()
+    r = run_oc(
+        ["get", "subscription", op_name, "-n", op_ns, "-o", "jsonpath={.spec.channel}"],
+        check=False,
+        capture_output=True,
+        timeout=20,
+    )
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def uses_aigateway_models_as_a_service(operator_version: str = "") -> bool:
+    """RHOAI 3.5+ moved MaaS from kserve.modelsAsService to aigateway.modelsAsAService."""
+    ver = (operator_version or _resolve_operator_version_for_dsc()).strip()
+    if ver and ver != "(unknown)":
+        return rhoai_version_at_least(ver, "3.5")
+    # Before CSV/OPERATOR_VERSION is written (early install-dep-operators), infer from pipeline params.
+    channel = (
+        os.environ.get("RHOAI_CHANNEL", "").strip()
+        or os.environ.get("UPDATE_CHANNEL", "").strip()
+        or _probe_update_channel_from_cluster()
+    )
+    if channel.startswith("stable-3.5") or channel == "beta":
+        return rhoai_version_at_least("3.5", "3.5")
+    if channel.startswith("stable-3."):
+        channel_ver = channel.removeprefix("stable-")
+        if rhoai_version_at_least(channel_ver, "3.5"):
+            return True
+    raw = os.environ.get("RHOAI_VERSION", "").strip()
+    if raw:
+        normalized = raw.removeprefix("rhoai-").replace("-", ".")
+        if rhoai_version_at_least(normalized, "3.5"):
+            return True
+    return False
 
 
 def _install_requires_dashboard_gateway() -> bool:
@@ -174,7 +221,7 @@ def _smoke_components_need_servicemesh(components_csv: str) -> bool:
 
 
 def smoke_components_use_kserve_raw_deployment(components_csv: str) -> bool:
-    """EaaS smoke uses KServe RawDeployment to avoid Serverless/Service Mesh operators."""
+    """EPHC smoke uses KServe RawDeployment to avoid Serverless/Service Mesh operators."""
     ids = {c.strip() for c in components_csv.split(",") if c.strip()}
     return bool(ids & {"model_server", "model_runtime", "maas_billing", "ai_safety"})
 
@@ -191,6 +238,7 @@ def _kserve_component_block(
     managed: bool,
     enable_models_as_service: bool,
     use_raw_deployment: bool = False,
+    operator_version: str = "",
 ) -> list[str]:
     lines = [
         "    kserve:",
@@ -205,10 +253,29 @@ def _kserve_component_block(
                 "        name: knative-serving",
             ]
         )
-    if enable_models_as_service:
+    if enable_models_as_service and not uses_aigateway_models_as_a_service(operator_version):
         lines.extend(
             [
                 "      modelsAsService:",
+                "        managementState: Managed",
+            ]
+        )
+    return lines
+
+
+def _aigateway_component_block(
+    *,
+    managed: bool,
+    enable_models_as_a_service: bool,
+) -> list[str]:
+    lines = [
+        "    aigateway:",
+        f"      managementState: {'Managed' if managed else 'Removed'}",
+    ]
+    if managed and enable_models_as_a_service:
+        lines.extend(
+            [
+                "      modelsAsAService:",
                 "        managementState: Managed",
             ]
         )
@@ -221,13 +288,16 @@ def _resolve_operator_version_for_dsc() -> str:
     if path:
         try:
             ver = Path(path).read_text(encoding="utf-8").strip()
-            if ver:
+            if ver and ver != "(unknown)":
                 return ver
         except OSError:
             pass
     ver = os.environ.get("OPERATOR_VERSION", "").strip()
-    if ver:
+    if ver and ver != "(unknown)":
         return ver
+    gate_ver = resolve_operator_version_for_gates()
+    if gate_ver and gate_ver != "(unknown)":
+        return gate_ver
     return probe_operator_version_from_cluster()
 
 
@@ -276,6 +346,8 @@ def _build_dsc_smoke_yaml(
         "spec:",
         "  components:",
     ]
+    op_ver = operator_version or (_resolve_operator_version_for_dsc() if defer_for_install else "")
+    use_aigateway_maas = uses_aigateway_models_as_a_service(op_ver)
     for key in _DSC_COMPONENT_KEYS:
         if key == "kserve":
             lines.extend(
@@ -283,6 +355,17 @@ def _build_dsc_smoke_yaml(
                     managed=key in managed,
                     enable_models_as_service=enable_maas,
                     use_raw_deployment=use_kserve_raw_deployment,
+                    operator_version=op_ver,
+                )
+            )
+            continue
+        if key == "aigateway":
+            if not use_aigateway_maas:
+                continue
+            lines.extend(
+                _aigateway_component_block(
+                    managed=enable_maas or key in managed,
+                    enable_models_as_a_service=enable_maas,
                 )
             )
             continue
@@ -409,13 +492,16 @@ def _sync_dsc_smoke_components(
     enable_models_as_service: bool = True,
 ) -> None:
     """Align default-dsc component managementState with the smoke COMPONENTS selection."""
+    operator_version = _resolve_operator_version_for_dsc()
     managed = _dsc_smoke_managed_components(
         components_csv,
         defer_for_install=True,
-        operator_version=_resolve_operator_version_for_dsc(),
+        operator_version=operator_version,
     )
     ids = {c.strip() for c in components_csv.split(",") if c.strip()}
     use_raw = smoke_components_use_kserve_raw_deployment(components_csv)
+    use_aigateway_maas = uses_aigateway_models_as_a_service(operator_version)
+    enable_maas = enable_models_as_service and smoke_enables_models_as_service(ids)
     components_patch: dict[str, Any] = {}
     for key in _DSC_COMPONENT_KEYS:
         if key == "kserve":
@@ -424,9 +510,20 @@ def _sync_dsc_smoke_components(
             }
             if key in managed and use_raw:
                 kserve_patch.update(_kserve_raw_deployment_patch())
-            if enable_models_as_service and smoke_enables_models_as_service(ids):
+            if enable_maas and not use_aigateway_maas:
                 kserve_patch["modelsAsService"] = {"managementState": "Managed"}
             components_patch[key] = kserve_patch
+            continue
+        if key == "aigateway":
+            if not use_aigateway_maas:
+                continue
+            components_patch[key] = {
+                "managementState": "Managed"
+                if (enable_maas or key in managed)
+                else "Removed",
+            }
+            if enable_maas:
+                components_patch[key]["modelsAsAService"] = {"managementState": "Managed"}
             continue
         components_patch[key] = {
             "managementState": "Managed" if key in managed else "Removed",
@@ -444,6 +541,51 @@ def _sync_dsc_smoke_components(
     print("✓ Patched DataScienceCluster/default-dsc component states for smoke selection")
 
 
+def _webhook_retryable_patch_error(err: str) -> bool:
+    err_lower = (err or "").lower()
+    return (
+        "no endpoints available for service" in err_lower
+        or "failed calling webhook" in err_lower
+    )
+
+
+def _patch_dsc_merge_with_webhook_retry(
+    patch_doc: str,
+    *,
+    label: str,
+    timeout_sec: int = 300,
+) -> None:
+    """Merge-patch default-dsc, retrying when the operator admission webhook is unavailable."""
+    deadline = time.time() + timeout_sec
+    last_err = ""
+    while time.time() < deadline:
+        r = oc_run(
+            ["patch", "datasciencecluster", "default-dsc", "--type=merge", "-p", patch_doc],
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+        if r.returncode == 0:
+            print(f"✓ Patched DataScienceCluster/default-dsc {label}")
+            return
+        last_err = (r.stderr or r.stdout or "").strip()
+        if _webhook_retryable_patch_error(last_err):
+            print(
+                f"Waiting for admission webhook before patch default-dsc {label}...",
+                flush=True,
+            )
+            time.sleep(10)
+            continue
+        raise RuntimeError(
+            f"Could not patch DataScienceCluster/default-dsc {label}: "
+            f"{last_err or 'unknown error'}"
+        )
+    raise RuntimeError(
+        f"Could not patch DataScienceCluster/default-dsc {label} after {timeout_sec}s: "
+        f"{last_err or 'admission webhook unavailable'}"
+    )
+
+
 def ensure_dsc_component_management_state(dsc_key: str, management_state: str) -> None:
     """Merge-patch one DSC component managementState without changing other components."""
     if not _cr_exists("datasciencecluster", "default-dsc"):
@@ -451,38 +593,20 @@ def ensure_dsc_component_management_state(dsc_key: str, management_state: str) -
     patch_doc = json.dumps(
         {"spec": {"components": {dsc_key: {"managementState": management_state}}}}
     )
-    r = oc_run(
-        ["patch", "datasciencecluster", "default-dsc", "--type=merge", "-p", patch_doc],
-        check=False,
-        capture_output=True,
-        timeout=60,
+    _patch_dsc_merge_with_webhook_retry(
+        patch_doc,
+        label=f"{dsc_key}={management_state}",
     )
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or "").strip()
-        raise RuntimeError(
-            f"Could not patch DataScienceCluster/default-dsc "
-            f"{dsc_key}={management_state}: {err or 'unknown error'}"
-        )
-    print(f"✓ Patched DataScienceCluster/default-dsc {dsc_key}={management_state}")
 
 
 def ensure_dsc_component_managed(dsc_key: str) -> None:
     """Merge-patch one DSC component to Managed without changing other components."""
     if not _cr_exists("datasciencecluster", "default-dsc"):
         raise RuntimeError("DataScienceCluster/default-dsc missing; cannot enable DSC component")
+    if dsc_component_management_state(dsc_key) == "Managed":
+        return
     patch_doc = json.dumps({"spec": {"components": {dsc_key: {"managementState": "Managed"}}}})
-    r = oc_run(
-        ["patch", "datasciencecluster", "default-dsc", "--type=merge", "-p", patch_doc],
-        check=False,
-        capture_output=True,
-        timeout=60,
-    )
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or "").strip()
-        raise RuntimeError(
-            f"Could not patch DataScienceCluster/default-dsc {dsc_key}=Managed: {err or 'unknown error'}"
-        )
-    print(f"✓ Patched DataScienceCluster/default-dsc {dsc_key}=Managed")
+    _patch_dsc_merge_with_webhook_retry(patch_doc, label=f"{dsc_key}=Managed")
 
 
 def dsc_component_management_state(dsc_key: str) -> str:
@@ -538,33 +662,53 @@ def batch_ensure_dsc_managed_for_smoke(component_ids: set[str]) -> None:
     if not component_ids or not _cr_exists("datasciencecluster", "default-dsc"):
         return
     csv = ",".join(sorted(component_ids))
+    if (
+        "ogx" in component_ids
+        and "llama_stack" not in component_ids
+        and dsc_component_management_state("llamastackoperator") == "Managed"
+    ):
+        ensure_dsc_component_removed("llamastackoperator")
     managed = _dsc_smoke_managed_components(
         csv,
         operator_version=_resolve_operator_version_for_dsc(),
     )
-    if "ogx" in component_ids and dsc_component_management_state("llamastackoperator") == "Managed":
-        ensure_dsc_component_removed("llamastackoperator")
     for key in sorted(managed):
         ensure_dsc_component_managed(key)
 
 
 def ensure_dsc_models_as_service() -> None:
-    """Ensure kserve.modelsAsService is Managed (Jenkins COMPONENT_NAMES modelsasservice:Managed)."""
+    """Ensure MaaS is Managed on default-dsc (kserve.modelsAsService pre-3.5; aigateway.modelsAsAService on 3.5+)."""
     if not _cr_exists("datasciencecluster", "default-dsc"):
         print("WARN: default-dsc missing; skipping modelsAsService patch", file=sys.stderr)
         return
-    patch_doc = json.dumps(
-        {
-            "spec": {
-                "components": {
-                    "kserve": {
-                        "managementState": "Managed",
-                        "modelsAsService": {"managementState": "Managed"},
+    if uses_aigateway_models_as_a_service():
+        patch_doc = json.dumps(
+            {
+                "spec": {
+                    "components": {
+                        "aigateway": {
+                            "managementState": "Managed",
+                            "modelsAsAService": {"managementState": "Managed"},
+                        }
                     }
                 }
             }
-        }
-    )
+        )
+        label = "aigateway.modelsAsAService"
+    else:
+        patch_doc = json.dumps(
+            {
+                "spec": {
+                    "components": {
+                        "kserve": {
+                            "managementState": "Managed",
+                            "modelsAsService": {"managementState": "Managed"},
+                        }
+                    }
+                }
+            }
+        )
+        label = "kserve.modelsAsService"
     r = oc_run(
         ["patch", "datasciencecluster", "default-dsc", "--type=merge", "-p", patch_doc],
         check=False,
@@ -573,8 +717,155 @@ def ensure_dsc_models_as_service() -> None:
     )
     if r.returncode != 0:
         err = (r.stderr or r.stdout or "").strip()
-        raise RuntimeError(f"Could not patch kserve.modelsAsService on default-dsc: {err or 'unknown error'}")
-    print("✓ Patched DataScienceCluster/default-dsc kserve.modelsAsService=Managed")
+        raise RuntimeError(f"Could not patch {label} on default-dsc: {err or 'unknown error'}")
+    print(f"✓ Patched DataScienceCluster/default-dsc {label}=Managed")
+    if uses_aigateway_models_as_a_service():
+        ensure_aigateway_models_as_a_service_managed()
+
+
+_AIGATEWAY_CR = "default-aigateway"
+_MAAS_API_DEPLOY_NS = ("redhat-ai-gateway-infra", "redhat-ods-applications")
+
+
+def _aigateway_models_as_a_service_state() -> str:
+    r = oc_run(
+        [
+            "get",
+            "aigateway",
+            _AIGATEWAY_CR,
+            "-o",
+            "jsonpath={.spec.modelsAsAService.managementState}",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def _maas_api_deployment_ready() -> bool:
+    for ns in _MAAS_API_DEPLOY_NS:
+        r = oc_run(
+            [
+                "get",
+                "deployment",
+                "maas-api",
+                "-n",
+                ns,
+                "-o",
+                "jsonpath={.status.readyReplicas}",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        if r.returncode != 0:
+            continue
+        try:
+            if int((r.stdout or "0").strip() or "0") >= 1:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def ensure_aigateway_models_as_a_service_managed(*, wait_timeout_sec: int = 180) -> None:
+    """Sync default-aigateway when DSC has modelsAsAService Managed but AIGateway CR lags."""
+    if not uses_aigateway_models_as_a_service():
+        return
+    deadline = time.time() + wait_timeout_sec
+    while not _cr_exists("aigateway", _AIGATEWAY_CR):
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"AIGateway/{_AIGATEWAY_CR} not found after {wait_timeout_sec}s"
+            )
+        print(f"Waiting for AIGateway/{_AIGATEWAY_CR} CR...", flush=True)
+        time.sleep(12)
+    remaining = max(1, int(deadline - time.time()))
+    state = _aigateway_models_as_a_service_state()
+    if state != "Managed":
+        patch_doc = json.dumps(
+            {"spec": {"modelsAsAService": {"managementState": "Managed"}}}
+        )
+        r = oc_run(
+            ["patch", "aigateway", _AIGATEWAY_CR, "--type=merge", "-p", patch_doc],
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            raise RuntimeError(
+                f"Could not patch AIGateway/{_AIGATEWAY_CR} modelsAsAService=Managed: "
+                f"{err or 'unknown error'}"
+            )
+        print(f"✓ Patched AIGateway/{_AIGATEWAY_CR} modelsAsAService=Managed", flush=True)
+    _wait_aigateway_models_as_a_service_reconciled(timeout_sec=remaining)
+
+
+def _wait_aigateway_models_as_a_service_reconciled(*, timeout_sec: int) -> None:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if _maas_api_deployment_ready():
+            print(
+                f"✓ AIGateway/{_AIGATEWAY_CR} reconciled (maas-api deployment ready)",
+                flush=True,
+            )
+            return
+        gen_r = oc_run(
+            [
+                "get",
+                "aigateway",
+                _AIGATEWAY_CR,
+                "-o",
+                "jsonpath={.metadata.generation}\t{.status.observedGeneration}",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        dep_r = oc_run(
+            [
+                "get",
+                "aigateway",
+                _AIGATEWAY_CR,
+                "-o",
+                'jsonpath={.status.conditions[?(@.type=="DeploymentsAvailable")].status}',
+            ],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        parts = (gen_r.stdout or "").strip().split("\t")
+        generation = parts[0] if parts else ""
+        observed = parts[1] if len(parts) > 1 else ""
+        dep_status = (dep_r.stdout or "").strip()
+        if generation and observed and generation == observed and dep_status == "True":
+            print(
+                f"✓ AIGateway/{_AIGATEWAY_CR} reconciled "
+                f"(observedGeneration={observed}, DeploymentsAvailable=True)",
+                flush=True,
+            )
+            return
+        if int(time.time()) % 60 < 12:
+            print(
+                f"Waiting for AIGateway/{_AIGATEWAY_CR} modelsAsAService reconcile "
+                f"(generation={generation or '?'} observed={observed or '?'} "
+                f"DeploymentsAvailable={dep_status or '?'})...",
+                flush=True,
+            )
+        time.sleep(12)
+    if _maas_api_deployment_ready():
+        print(
+            f"✓ AIGateway/{_AIGATEWAY_CR} reconciled at timeout boundary (maas-api ready)",
+            flush=True,
+        )
+        return
+    raise RuntimeError(
+        f"AIGateway/{_AIGATEWAY_CR} modelsAsAService not reconciled after {timeout_sec}s"
+    )
 
 
 def _smoke_components_need_s3(components_csv: str) -> bool:

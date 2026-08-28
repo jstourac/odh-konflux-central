@@ -45,9 +45,9 @@ def test_external_kubeconfig_ok_and_err(tmp_path: Path, parser, monkeypatch: pyt
     kubeconfig.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
     kc = str(kubeconfig)
 
-    args = parse_cli_args(parser, ["--external-kubeconfig", kc, "--product", "existing", "--tests", "bvt"])
+    args = parse_cli_args(parser, ["--external-kubeconfig", kc, "--tests", "bvt"])
     assert args.external_kubeconfig_path is not None
-    assert args.product == "existing"
+    assert args.product == ""
 
     args = parse_cli_args(parser, ["--external-kubeconfig-secret", "my-kubeconfig-secret", "--tests", "smoke"])
     assert args.external_kubeconfig_secret == "my-kubeconfig-secret"
@@ -58,8 +58,8 @@ def test_external_kubeconfig_ok_and_err(tmp_path: Path, parser, monkeypatch: pyt
             ["--external-kubeconfig", kc, "--external-kubeconfig-secret", "x"],
         )
 
-    with pytest.raises(AppError, match="existing runs skip FBC"):
-        parse_cli_args(parser, ["--external-kubeconfig", kc, "--ocp-version", "4.20", "--product", "existing"])
+    with pytest.raises(AppError, match="test-only runs skip FBC"):
+        parse_cli_args(parser, ["--external-kubeconfig", kc, "--ocp-version", "4.20"])
 
     args = parse_cli_args(
         parser,
@@ -74,26 +74,70 @@ def test_external_kubeconfig_ok_and_err(tmp_path: Path, parser, monkeypatch: pyt
     with pytest.raises(AppError, match="Trigger/install options cannot be used"):
         parse_cli_args(parser, ["-w", "--external-kubeconfig", kc])
 
-    args = parse_cli_args(parser, ["--external-kubeconfig", kc, "--cleanup", "--tests", "smoke"])
+    with pytest.raises(AppError, match="Trigger/install options cannot be used"):
+        parse_cli_args(parser, ["--external-kubeconfig", kc, "--cleanup", "--tests", "smoke"])
+
+    with pytest.raises(AppError, match="Trigger/install options cannot be used"):
+        parse_cli_args(parser, ["--external-kubeconfig", kc, "--cleanup"])
+
+    args = parse_cli_args(
+        parser,
+        ["--external-kubeconfig", kc, "--product", "rhoai", "--tests", "smoke"],
+    )
     assert args.cleanup is True
+    assert args.cleanup_maintenance is False
+
+    args = parse_cli_args(
+        parser,
+        ["--external-kubeconfig", kc, "--product", "rhoai", "--tests", "smoke", "--cleanup", "false"],
+    )
+    assert args.cleanup is False
+    assert args.cleanup_opt_out is True
+
+    with pytest.raises(AppError, match="Trigger/install options cannot be used"):
+        parse_cli_args(
+            parser,
+            [
+                "--external-kubeconfig",
+                kc,
+                "--install-dependencies",
+                "--tests",
+                "smoke",
+                "--cleanup",
+            ],
+        )
 
 def test_install_dependencies_validation(tmp_path: Path, parser, monkeypatch: pytest.MonkeyPatch) -> None:
     kubeconfig = tmp_path / "kubeconfig"
     kubeconfig.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
     kc = str(kubeconfig)
-    base = ["--external-kubeconfig", kc, "--product", "existing", "--tests", "smoke"]
+    base = ["--external-kubeconfig", kc, "--tests", "smoke"]
 
     args = parse_cli_args(parser, [*base, "--install-dependencies"])
     assert args.install_dependencies is True
 
-    with pytest.raises(AppError, match="only supported with --product existing"):
+    with pytest.raises(AppError, match="requires test-only mode"):
         parse_cli_args(parser, ["--product", "rhoai", "--install-dependencies", "--tests", "smoke"])
 
     with pytest.raises(AppError, match="requires --tests smoke"):
-        parse_cli_args(parser, ["--external-kubeconfig", kc, "--product", "existing", "--install-dependencies", "--tests", "bvt"])
+        parse_cli_args(parser, ["--external-kubeconfig", kc, "--install-dependencies", "--tests", "bvt"])
 
     with pytest.raises(AppError, match="requires --external-kubeconfig"):
-        parse_cli_args(parser, ["--product", "existing", "--install-dependencies", "--tests", "smoke"])
+        parse_cli_args(parser, ["--install-dependencies", "--tests", "smoke"])
+
+
+def test_quay_pull_secret_name_defaults_without_flag(parser) -> None:
+    from suite.constants import DEFAULT_QUAY_PULL_SECRET_NAME
+
+    args = parse_cli_args(parser, ["--product", "rhoai"])
+    assert args.quay_pull_secret_name == DEFAULT_QUAY_PULL_SECRET_NAME
+    assert args.quay_pull_secret_explicit is False
+
+
+def test_quay_pull_secret_name_explicit_flag(parser) -> None:
+    args = parse_cli_args(parser, ["--product", "rhoai", "--quay-pull-secret-name", "custom-quay"])
+    assert args.quay_pull_secret_name == "custom-quay"
+    assert args.quay_pull_secret_explicit is True
 
 def test_format_test_output_for_ui() -> None:
     from runners.report.junit_suite_report import format_test_output_for_ui

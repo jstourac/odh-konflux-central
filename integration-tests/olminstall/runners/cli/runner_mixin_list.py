@@ -12,7 +12,7 @@ from suite.constants import (
     ANNOTATION_SNAPSHOT,
     DEFAULT_LIST_COUNT,
     LIST_SUPPORTED_OCP_MAX_PRS,
-    RHOAI_E2E_EAAS_ITS_NAME,
+    RHOAI_E2E_EPHC_ITS_NAME,
     olminstall_smoke_only_pipelinerun,
 )
 from suite.pipelinerun_naming import is_olminstall_pipelinerun_name
@@ -143,7 +143,7 @@ class RunnerListMixin(RunnerOcpMixin):
         )
         if repo and branch:
             ns = self.args.namespace
-            its_name = RHOAI_E2E_EAAS_ITS_NAME
+            its_name = RHOAI_E2E_EPHC_ITS_NAME
             print(
                 f"{head}"
                 f"  This run applied the ITS with ``--konflux-repo`` / ``--konflux-branch``: **{repo}** @ **{branch}**.\n"

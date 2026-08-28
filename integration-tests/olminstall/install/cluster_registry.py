@@ -277,7 +277,9 @@ def preflight_openshift_release_dev_pull(*, strict: bool) -> None:
 
 
 def full_pull_setup_requested(product: str, quay_path: str) -> bool:
-    if product.strip().lower() == "existing":
+    from suite.constants import is_test_only_product
+
+    if is_test_only_product(product):
         return False
     if not os.environ.get("QUAY_PULL_SECRET_NAME", "").strip():
         return False

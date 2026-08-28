@@ -24,6 +24,7 @@ class WaitForSucceededCsvVersionTest(unittest.TestCase):
             patch.object(iav, "_subscription_target_csv", return_value=None),
             patch.object(iav, "pick_succeeded_csv_version", side_effect=phases),
             patch.object(iav, "_operator_csv_phase", side_effect=[("rhods-operator.3.5.0-ea.2", "Installing"), ("rhods-operator.3.5.0-ea.2", "InstallReady")]),
+            patch.object(iav, "subscription_bundle_unpack_failed", return_value=False),
             patch.object(iav.time, "monotonic", side_effect=[0, 1, 2, 3]),
             patch.object(iav.time, "sleep"),
         ):

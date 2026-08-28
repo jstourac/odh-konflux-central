@@ -3,7 +3,7 @@
 HyperShift sometimes projects Validating/MutatingWebhookConfigurations into the
 guest cluster with ``clientConfig.service.name=xxx-invalid-service-xxx`` (or another
 missing Service). Those fail closed and block Deployment/Service creates — breaking
-OGX fixtures and OpenShift Gateway controller reconciliation on EaaS.
+OGX fixtures and OpenShift Gateway controller reconciliation on EPHC.
 """
 
 from __future__ import annotations
@@ -109,9 +109,9 @@ def _delete_webhook_config(*, kind: str, name: str) -> bool:
 
 def _hypershift_webhook_cleanup_enabled() -> bool:
     from install.rosa_hcp_pull_setup import is_hypershift_managed_cluster
-    from install.gateway_config import cluster_source_is_eaas
+    from install.gateway_config import cluster_source_is_ephc
 
-    return cluster_source_is_eaas() or is_hypershift_managed_cluster()
+    return cluster_source_is_ephc() or is_hypershift_managed_cluster()
 
 
 def neutralize_broken_hypershift_admission_webhooks() -> int:

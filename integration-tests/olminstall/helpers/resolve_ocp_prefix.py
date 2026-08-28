@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Write the OCP minor prefix step result for EaaS pick-version.
+"""Write the OCP minor prefix step result for EPHC pick-version.
 
 Env:
   OVERRIDE — optional ``OCP_VERSION_PREFIX`` from the pipeline (whitespace stripped).
-  DEFAULT_MINOR — first supported minor from ``eaas-get-supported-versions`` (e.g. ``4.20``).
+  DEFAULT_MINOR — first supported minor from ``ephc-get-supported-versions`` (e.g. ``4.20``).
   PREFIX_RESULT_PATH — Tekton ``step.results.prefix`` file path.
 """
 

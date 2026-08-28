@@ -18,10 +18,23 @@ def normalize_ocp_minor(text: str) -> str:
 
 
 def rhoai_fbc_name_from_ocp_minor(ocp_minor: str) -> str:
-    """``4.21`` → ``rhoai-fbc-fragment-ocp-421``."""
+    """``4.21`` → ``rhoai-fbc-fragment-ocp-421``. Empty for OCP 5.x (no fragment yet)."""
     minor = normalize_ocp_minor(ocp_minor)
     major_s, minor_s = minor.split(".", 1)
+    if major_s != "4":
+        return ""
     return f"rhoai-fbc-fragment-ocp-{major_s}{int(minor_s):02d}"
+
+
+def rhoai_fbc_name_from_rhoai_version(version: str) -> str:
+    """``3.5`` → ``rhoai-fbc-fragment-v3-5`` (Konflux version-stream component id)."""
+    raw = (version or "").strip()
+    if not raw:
+        return ""
+    parts = raw.split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        return ""
+    return "rhoai-fbc-fragment-v" + "-".join(parts)
 
 
 def ocp_minor_from_rhoai_fbc_name(component_name: str) -> str:

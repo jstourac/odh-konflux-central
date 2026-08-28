@@ -20,13 +20,13 @@ from suite.component_catalog import (
     merged_setup_dependencies_args,
     resolve_shift_left_env_secret,
 )
-from suite.component_smoke_results import component_smoke_result_name
-from suite.constants import DEFAULT_SETUP_DEPENDENCIES_ARGS
 from suite.component_plan import parse_components_selection, resolve_components_csv
+from suite.component_smoke_flag_refresh import parse_pipeline_run_smoke_result_ids
+from suite.component_smoke_results import component_smoke_result_name
+from suite.constants import DEFAULT_SETUP_DEPENDENCIES_ARGS, is_test_only_product, product_installs_operator
 from install.dsc_install import components_need_models_as_service
 from suite.errors import AppError
 from suite.tests_config import compute_pipeline_result_flags, load_tests_catalog
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
 from suite.tests_plan import parse_tests_selection, validate_and_normalize_tests_csv
 
 _DISTRIBUTED_WORKLOADS_COMPONENTS = frozenset({"trainer", "distributed_workloads"})
@@ -49,14 +49,66 @@ EXTRA_RESULT_KEYS = (
 
 
 def _snapshot_only_no_cluster(*, product: str, cluster_source: str) -> bool:
-    """True when PRODUCT=existing with no external kubeconfig (placeholder BVT / no smoke)."""
+    """True when test-only PRODUCT with no external kubeconfig (placeholder BVT / no smoke)."""
     prod = (product or "").strip().lower()
     source = (cluster_source or "").strip()
-    if prod not in ("", "existing"):
+    if product_installs_operator(prod):
         return False
-    return source in ("", CLUSTER_SOURCE_EAAS)
+    return not source
 
 DEFAULT_SMOKE_AWS_SECRET = "unused-smoke-aws-secret"
+
+
+def _write_bool_tekton_result(
+    *,
+    path_var: str,
+    value: bool,
+    results_base: Path,
+    result_label: str = "",
+    required: bool = True,
+) -> int:
+    p = os.environ.get(path_var, "").strip()
+    if not p:
+        if not required:
+            return 0
+        suffix = f" for result {result_label}" if result_label else ""
+        print(f"Missing env {path_var}{suffix}", file=sys.stderr)
+        return 1
+    result_path = Path(p).resolve()
+    if not result_path.is_relative_to(results_base):
+        print(
+            f"ERROR: {path_var}={p!r} resolves outside allowed results directory {results_base}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("true" if value else "false", encoding="utf-8")
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        print(f"ERROR: could not write result file {path_var}={p!r}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _write_workspace_text(env_name: str, content: str, *, required: bool = True) -> int:
+    workspace = os.environ.get(env_name, "").strip()
+    if not workspace:
+        if not required:
+            return 0
+        print(f"Missing env {env_name} for parse run-config", file=sys.stderr)
+        return 1
+    path = Path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return 0
+
+
+def _log_workspace_only_tekton_result(result_path_env: str, label: str) -> None:
+    if os.environ.get(result_path_env, "").strip():
+        print(
+            f"INFO: {label} written to workspace only; emit-parse-artifacts publishes Tekton result",
+            flush=True,
+        )
 
 
 def _write_component_smoke_results(
@@ -69,23 +121,13 @@ def _write_component_smoke_results(
     """Write RUN_SMOKE_<id> true/false for each catalog component."""
     for cid in catalog_component_ids:
         key = component_smoke_result_name(cid)
-        path_var = f"{key}_PATH"
-        p = os.environ.get(path_var, "").strip()
-        if not p:
-            continue
-        result_path = Path(p).resolve()
-        if not result_path.is_relative_to(results_base):
-            print(
-                f"ERROR: {path_var}={p!r} resolves outside allowed results directory {results_base}",
-                file=sys.stderr,
-            )
-            return 1
         selected = run_component_tests and cid in selected_ids
-        try:
-            result_path.parent.mkdir(parents=True, exist_ok=True)
-            result_path.write_text("true" if selected else "false", encoding="utf-8")
-        except (FileNotFoundError, PermissionError, OSError) as exc:
-            print(f"ERROR: could not write result file {path_var}={p!r}: {exc}", file=sys.stderr)
+        if _write_bool_tekton_result(
+            path_var=f"{key}_PATH",
+            value=selected,
+            results_base=results_base,
+            required=False,
+        ):
             return 1
     return 0
 
@@ -104,17 +146,17 @@ def main() -> int:
 
     try:
         catalog = load_tests_catalog(cfg)
-        csv = validate_and_normalize_tests_csv(tests_raw if tests_raw else None, catalog)
+        csv = validate_and_normalize_tests_csv(tests_raw or None, catalog)
         selected = parse_tests_selection(csv, catalog)
         flags = compute_pipeline_result_flags(selected, catalog)
 
         components_csv = ""
         setup_deps_args = ""
         needs_smoke_maas_deps = False
-        product = os.environ.get("PRODUCT", "existing").strip().lower()
+        product = os.environ.get("PRODUCT", "").strip().lower()
         cluster_source = os.environ.get("CLUSTER_SOURCE", "").strip()
         snapshot_only = _snapshot_only_no_cluster(product=product, cluster_source=cluster_source)
-        installs_product = product not in ("", "existing")
+        installs_product = product_installs_operator(product)
         install_dependencies = os.environ.get("INSTALL_DEPENDENCIES", "").strip().lower() in (
             "1",
             "true",
@@ -125,24 +167,22 @@ def main() -> int:
 
         if selected & {"smoke", "tier1"}:
             components_csv = resolve_components_csv(
-                components_raw if components_raw else None,
+                components_raw or None,
                 tests_catalog=catalog,
                 tests_selected=selected,
                 components_catalog=comp_catalog,
             )
             selected_component_ids = parse_components_selection(components_csv, comp_catalog)
             needs_smoke_maas_deps = components_need_models_as_service(selected_component_ids)
+            merged = merged_setup_dependencies_args(selected_component_ids, comp_catalog)
             if installs_product:
-                merged = merged_setup_dependencies_args(selected_component_ids, comp_catalog)
-                setup_deps_args = merged if merged else DEFAULT_SETUP_DEPENDENCIES_ARGS
+                setup_deps_args = merged or DEFAULT_SETUP_DEPENDENCIES_ARGS
             elif install_dependencies:
-                merged = merged_setup_dependencies_args(selected_component_ids, comp_catalog)
-                setup_deps_args = merged if merged else (
+                setup_deps_args = merged or (
                     DEFAULT_SETUP_DEPENDENCIES_ARGS if needs_smoke_maas_deps else ""
                 )
-            elif needs_smoke_maas_deps and (selected & {"smoke", "tier1"}):
-                merged = merged_setup_dependencies_args(selected_component_ids, comp_catalog)
-                setup_deps_args = merged if merged else DEFAULT_SETUP_DEPENDENCIES_ARGS
+            elif needs_smoke_maas_deps:
+                setup_deps_args = merged or DEFAULT_SETUP_DEPENDENCIES_ARGS
         elif installs_product:
             setup_deps_args = DEFAULT_SETUP_DEPENDENCIES_ARGS
 
@@ -150,7 +190,7 @@ def main() -> int:
         if snapshot_only:
             if run_component_tests:
                 print(
-                    "INFO snapshot-only (PRODUCT=existing, no CLUSTER_SOURCE): "
+                    "INFO snapshot-only (test-only PRODUCT, no CLUSTER_SOURCE): "
                     "smoke/tier1 disabled — pass --external-kubeconfig for component tests",
                     flush=True,
                 )
@@ -221,79 +261,45 @@ def main() -> int:
     results_base = Path(os.environ.get("RESULTS_DIR", "/tekton/results")).resolve()
     all_keys = set(flags) | set(EXTRA_RESULT_KEYS)
     for key in sorted(all_keys):
-        val = flags.get(key, False)
-        path_var = f"{key}_PATH"
-        p = os.environ.get(path_var, "").strip()
-        if not p:
-            print(f"Missing env {path_var} for result {key}", file=sys.stderr)
-            return 1
-        result_path = Path(p).resolve()
-        if not result_path.is_relative_to(results_base):
-            print(
-                f"ERROR: {path_var}={p!r} resolves outside allowed results directory {results_base}",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            result_path.parent.mkdir(parents=True, exist_ok=True)
-            result_path.write_text("true" if val else "false", encoding="utf-8")
-        except (FileNotFoundError, PermissionError, OSError) as exc:
-            print(
-                f"ERROR: could not write result file {path_var}={p!r}: {exc}",
-                file=sys.stderr,
-            )
+        if _write_bool_tekton_result(
+            path_var=f"{key}_PATH",
+            value=bool(flags.get(key, False)),
+            results_base=results_base,
+            result_label=key,
+        ):
             return 1
 
+    smoke_result_ids = parse_pipeline_run_smoke_result_ids(comp_catalog.component_ids)
     if _write_component_smoke_results(
-        catalog_component_ids=(),
+        catalog_component_ids=smoke_result_ids,
         selected_ids=selected_component_ids,
         run_component_tests=bool(flags.get("RUN_COMPONENT_TESTS")),
         results_base=results_base,
     ):
         return 1
 
-    components_path = os.environ.get("COMPONENTS_CSV_PATH", "").strip()
-    workspace_csv = os.environ.get("COMPONENTS_CSV_WORKSPACE", "").strip()
-    if not workspace_csv:
-        print("Missing env COMPONENTS_CSV_WORKSPACE for parse run-config", file=sys.stderr)
+    if _write_workspace_text("COMPONENTS_CSV_WORKSPACE", components_csv):
         return 1
-    ws_path = Path(workspace_csv)
-    ws_path.parent.mkdir(parents=True, exist_ok=True)
-    ws_path.write_text(components_csv, encoding="utf-8")
-    if components_path:
-        print(
-            "INFO: COMPONENTS_CSV written to workspace only; emit-parse-artifacts publishes Tekton result",
-            flush=True,
-        )
+    _log_workspace_only_tekton_result("COMPONENTS_CSV_PATH", "COMPONENTS_CSV")
 
-    setup_deps_path = os.environ.get("SETUP_DEPENDENCIES_ARGS_PATH", "").strip()
-    workspace_setup = os.environ.get("SETUP_DEPENDENCIES_ARGS_WORKSPACE", "").strip()
-    if not workspace_setup:
-        print("Missing env SETUP_DEPENDENCIES_ARGS_WORKSPACE for parse run-config", file=sys.stderr)
+    if _write_workspace_text("SETUP_DEPENDENCIES_ARGS_WORKSPACE", setup_deps_args):
         return 1
-    ws_path = Path(workspace_setup)
-    ws_path.parent.mkdir(parents=True, exist_ok=True)
-    ws_path.write_text(setup_deps_args, encoding="utf-8")
-    if setup_deps_path:
-        print(
-            "INFO: SETUP_DEPENDENCIES_ARGS written to workspace only; emit-parse-artifacts publishes Tekton result",
-            flush=True,
-        )
+    _log_workspace_only_tekton_result("SETUP_DEPENDENCIES_ARGS_PATH", "SETUP_DEPENDENCIES_ARGS")
 
-    smoke_aws_path = os.environ.get("SMOKE_AWS_SECRET_PATH", "").strip()
-    workspace_smoke_aws = os.environ.get("SMOKE_AWS_SECRET_WORKSPACE", "").strip()
-    if flags.get("RUN_COMPONENT_TESTS") and not workspace_smoke_aws:
-        print("Missing env SMOKE_AWS_SECRET_WORKSPACE for parse run-config", file=sys.stderr)
+    run_component_tests = bool(flags.get("RUN_COMPONENT_TESTS"))
+    if _write_workspace_text(
+        "SMOKE_AWS_SECRET_WORKSPACE",
+        smoke_aws_secret,
+        required=run_component_tests,
+    ):
         return 1
-    if workspace_smoke_aws:
-        ws_path = Path(workspace_smoke_aws)
-        ws_path.parent.mkdir(parents=True, exist_ok=True)
-        ws_path.write_text(smoke_aws_secret, encoding="utf-8")
-    if smoke_aws_path:
-        print(
-            "INFO: SMOKE_AWS_SECRET written to workspace only; emit-parse-artifacts publishes Tekton result",
-            flush=True,
-        )
+    _log_workspace_only_tekton_result("SMOKE_AWS_SECRET_PATH", "SMOKE_AWS_SECRET")
+
+    secret_source = (os.environ.get("SECRET_SOURCE") or "vault").strip().lower()
+    if secret_source not in ("vault", "tenant"):
+        secret_source = "vault"
+    if _write_workspace_text("SECRET_SOURCE_WORKSPACE", secret_source, required=False):
+        return 1
 
     return 0
 

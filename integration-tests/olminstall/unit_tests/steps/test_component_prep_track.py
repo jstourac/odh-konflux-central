@@ -15,19 +15,19 @@ from steps.component_prep_track import (
 
 
 class ComponentPrepTrackTest(unittest.TestCase):
-    def test_resolve_eaas_track(self) -> None:
+    def test_resolve_ephc_track(self) -> None:
         with patch.dict(
             "os.environ",
-            {"CLUSTER_SOURCE": "EAAS", "PRODUCT": "rhoai"},
+            {"CLUSTER_SOURCE": "EPHC", "PRODUCT": "rhoai"},
             clear=False,
         ):
-            self.assertEqual(resolve_component_prep_track(), "eaas")
-            self.assertEqual(component_prep_log_prefix(), "[prep-eaas]")
+            self.assertEqual(resolve_component_prep_track(), "ephc")
+            self.assertEqual(component_prep_log_prefix(), "[prep-ephc]")
 
     def test_resolve_external_track(self) -> None:
         with patch.dict(
             "os.environ",
-            {"CLUSTER_SOURCE": "olminstall-kubeconfig-psi-07", "PRODUCT": "existing"},
+            {"CLUSTER_SOURCE": "olminstall-kubeconfig-psi-07", "PRODUCT": ""},
             clear=False,
         ):
             self.assertEqual(resolve_component_prep_track(), "external")
@@ -38,8 +38,8 @@ class ComponentPrepTrackTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict("os.environ", {"TESTS_SHARED": tmp}, clear=False):
-                record_component_prep_track("eaas")
-                self.assertIn("EaaS", read_component_prep_track_note())
+                record_component_prep_track("ephc")
+                self.assertIn("EPHC", read_component_prep_track_note())
 
 
 if __name__ == "__main__":

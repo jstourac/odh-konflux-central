@@ -1,14 +1,14 @@
 ---
-# Playpen-only EaaS smoke slice A: all smoke COMPONENTS except platform + dashboard_cypress (slice B).
+# Playpen-only EPHC smoke slice B: platform + dashboard_cypress only (everything else on slice A).
 # Targets testops-playpen — do NOT map to rhoai-fbc-fragment-* until A/B is proven.
-# Trigger: --run-its rhoai-e2e-eaas-playpen-a --konflux-app testops-playpen
+# Trigger: --run-its rhoai-e2e-ephc-playpen-b --konflux-app testops-playpen
 #   or --enable-its (applies to playpen; context push = manual Snapshot only).
 apiVersion: appstudio.redhat.com/v1beta2
 kind: IntegrationTestScenario
 metadata:
   labels:
     test.appstudio.openshift.io/optional: "true"
-  name: rhoai-e2e-eaas-playpen-a
+  name: rhoai-e2e-ephc-playpen-b
   namespace: rhoai-tenant
 spec:
   application: testops-playpen
@@ -17,7 +17,7 @@ spec:
       name: push
   params:
     - name: CLUSTER_SOURCE
-      value: "EAAS"
+      value: "EPHC"
     - name: OCP_VERSION
       value: "latest (default)"
     - name: PRODUCT
@@ -37,9 +37,9 @@ spec:
     - name: TEST_GATES
       value: "bvt,smoke"
     - name: COMPONENTS
-      value: "workbenches,model_registry,model_server,model_runtime,maas_billing,ai_pipelines,kuberay,mlflow,ogx,ai_safety,ai_safety_evalhub,ai_safety_guardrails,ai_safety_lmeval,ai_safety_trustyai_operator,ai_safety_trustyai_service,llama_stack,trainer,distributed_workloads,spark_operator,workbench_images,codeflare_sdk"
+      value: "dashboard_cypress,platform"
     - name: QUAY_PULL_SECRET_NAME
-      value: "rhoai-quay-secret"
+      value: "rhoai-external-quay-secret"
     - name: SCRIPTS_REPO_URL
       value: https://github.com/opendatahub-io/odh-konflux-central.git
     - name: SCRIPTS_REPO_REVISION
@@ -51,6 +51,6 @@ spec:
       - name: revision
         value: main
       - name: pathInRepo
-        value: integration-tests/olminstall/tekton/pipelines/olminstall-pipelinerun-eaas.yaml
+        value: integration-tests/olminstall/tekton/pipelines/olminstall-pipelinerun-ephc.yaml
     resolver: git
     resourceKind: pipelinerun

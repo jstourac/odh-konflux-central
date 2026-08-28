@@ -42,7 +42,12 @@ from install.llama_stack_deps import (
     components_csv_requires_llama_stack,
     try_prepare_llama_stack_operator,
 )
-from install.dsc_install import ensure_dsc_models_as_service
+from install.dsc_install import ensure_dsc_models_as_service, _install_requires_dashboard_gateway, _smoke_components_need_servicemesh
+from install.gateway_config import (
+    ensure_openshift_gateway_istio_for_dep_operators,
+    reconcile_servicemesh_olm_conflicts,
+)
+from suite.its_trigger_params import is_pooled_external_cluster_source
 from install.rhcl_deps import (
     ensure_maas_rhcl_dependency_stack,
     reconcile_rhcl_after_gitops_apply,
@@ -147,6 +152,53 @@ def _ensure_pyyaml_for_catalog() -> None:
     _ensure_pyyaml_available()
 
 
+def _dep_operators_need_openshift_gateway_istio(components_csv: str) -> bool:
+    """Gateway controller must reconcile before RHOAI install creates GatewayConfig."""
+    return _install_requires_dashboard_gateway() or _smoke_components_need_servicemesh(components_csv)
+
+
+def _gateway_istio_failure_fatal() -> bool:
+    cluster_source = os.environ.get("CLUSTER_SOURCE", "").strip()
+    if is_pooled_external_cluster_source(cluster_source):
+        return True
+    return os.environ.get("PRODUCT", "").strip().lower() in ("rhoai", "odh")
+
+
+def _ensure_openshift_gateway_istio_stack(components_csv: str) -> None:
+    if not _dep_operators_need_openshift_gateway_istio(components_csv):
+        return
+    try:
+        removed = reconcile_servicemesh_olm_conflicts("openshift-operators")
+        if removed:
+            print(
+                f"✓ Reconciled {removed} orphan Service Mesh CSV(s) before openshift-gateway Istio",
+                flush=True,
+            )
+        if not ensure_openshift_gateway_istio_for_dep_operators():
+            msg = (
+                "openshift-gateway Istio/controller not ready after install-dep-operators reconcile"
+            )
+            if _gateway_istio_failure_fatal():
+                raise RuntimeError(f"{msg}; install-rhoai will fail on GatewayConfig")
+            print(
+                f"WARN: {msg}; install-rhoai may time out on GatewayConfig",
+                file=sys.stderr,
+                flush=True,
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        if _gateway_istio_failure_fatal():
+            raise RuntimeError(
+                f"openshift-gateway Istio reconcile failed ({exc})"
+            ) from exc
+        print(
+            f"WARN: openshift-gateway Istio reconcile failed ({exc})",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def main() -> int:
     kubeconfig = os.environ.get("KUBECONFIG", "").strip()
     if not kubeconfig:
@@ -164,6 +216,11 @@ def main() -> int:
     _ensure_pyyaml_for_catalog()
     extra = os.environ.get("SETUP_DEPENDENCIES_ARGS", "").strip()
     components_csv = os.environ.get("COMPONENTS_CSV", "").strip()
+    try:
+        _ensure_openshift_gateway_istio_stack(components_csv)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     require_authorino = components_csv_requires_authorino(components_csv)
     require_llama = components_csv_requires_llama_stack(components_csv)
     will_run_setup = bool(extra or require_authorino)

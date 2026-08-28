@@ -2,8 +2,8 @@
 """Stage target-cluster kubeconfig at /credentials/kubeconfig for install/test tasks.
 
 Env:
-    CLUSTER_SOURCE     -- EAAS, or tenant Secret with key kubeconfig (external cluster)
-    EAAS_KUBECONFIG_REL -- path under /credentials from EaaS get-kubeconfig step
+    CLUSTER_SOURCE     -- EPHC, or tenant Secret with key kubeconfig (external cluster)
+    EPHC_KUBECONFIG_REL -- path under /credentials from EPHC get-kubeconfig step
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def _write_secure(path: Path, data: bytes) -> None:
 
 def main() -> int:
     external = external_kubeconfig_secret_name(os.environ.get("CLUSTER_SOURCE", ""))
-    eaas_rel = os.environ.get("EAAS_KUBECONFIG_REL", "").strip()
+    ephc_rel = (os.environ.get("EPHC_KUBECONFIG_REL") or "").strip()
     _CREDENTIALS.mkdir(parents=True, exist_ok=True)
 
     if external:
@@ -51,17 +51,17 @@ def main() -> int:
         print(f"External kubeconfig staged at {_KUBECONFIG}")
         return 0
 
-    if eaas_rel:
-        src = _CREDENTIALS / eaas_rel
+    if ephc_rel:
+        src = _CREDENTIALS / ephc_rel
         if not src.is_file():
-            print(f"ERROR: EaaS kubeconfig missing at {src}", file=sys.stderr)
+            print(f"ERROR: EPHC kubeconfig missing at {src}", file=sys.stderr)
             return 1
         if src.resolve() != _KUBECONFIG.resolve():
             _write_secure(_KUBECONFIG, src.read_bytes())
-        print(f"EaaS kubeconfig staged at {_KUBECONFIG} (from {eaas_rel})")
+        print(f"EPHC kubeconfig staged at {_KUBECONFIG} (from {ephc_rel})")
         return 0
 
-    print("ERROR: set CLUSTER_SOURCE (tenant Secret name) or EAAS_KUBECONFIG_REL", file=sys.stderr)
+    print("ERROR: set CLUSTER_SOURCE (tenant Secret name) or EPHC_KUBECONFIG_REL", file=sys.stderr)
     return 1
 
 

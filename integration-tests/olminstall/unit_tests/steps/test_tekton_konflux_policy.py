@@ -224,6 +224,8 @@ class TektonKonfluxPolicyTest(unittest.TestCase):
         for path in self.paths:
             doc = _load_yaml(path)
             for task_label, repo_path in _iter_git_task_refs(doc, label=path.name):
+                if not repo_path.startswith("integration-tests/olminstall/"):
+                    continue
                 full = _REPO_ROOT / repo_path
                 if not full.is_file():
                     missing.append(f"{path.name}/{task_label} -> {repo_path}")

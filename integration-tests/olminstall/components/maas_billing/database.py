@@ -17,11 +17,13 @@ from steps.tekton_util import git_clone
 
 from components.maas_billing.common import (
     _MAAS_APPS_NS,
+    _MAAS_API_NS_CANDIDATES,
     _MAAS_DB_SECRET,
     _MODELS_AS_SERVICE_DEST,
     _MODELS_AS_SERVICE_REPO,
     _kubectl_shim_dir,
     _secret_exists,
+    maas_api_namespace,
 )
 
 _MAAS_INFRA_NS = "odh-ai-gateway-infra"
@@ -118,8 +120,9 @@ def _repair_apps_maas_db_connection_url_if_needed() -> bool:
 
 def _restart_maas_api_after_db_config() -> None:
     """Roll maas-api so it picks up maas-db-config in redhat-ods-applications."""
+    ns = maas_api_namespace()
     r = oc_run(
-        ["get", "deployment", "maas-api", "-n", _MAAS_APPS_NS],
+        ["get", "deployment", "maas-api", "-n", ns],
         check=False,
         capture_output=True,
         timeout=30,
@@ -134,11 +137,11 @@ def _restart_maas_api_after_db_config() -> None:
     rollout_timeout = int(os.environ.get("MAAS_API_ROLLOUT_TIMEOUT_SEC", "300"))
     ready_timeout = int(os.environ.get("MAAS_API_READY_TIMEOUT_SEC", "600"))
     print(
-        f"Rolling out maas-api in {_MAAS_APPS_NS} after {_MAAS_DB_SECRET} update...",
+        f"Rolling out maas-api in {ns} after {_MAAS_DB_SECRET} update...",
         flush=True,
     )
     _rollout_restart_deployment(
-        _MAAS_APPS_NS,
+        ns,
         "maas-api",
         timeout_sec=rollout_timeout,
     )
@@ -372,26 +375,29 @@ def _read_maas_postgres_schema_version() -> int | None:
 
 
 def _maas_api_deployment_ready() -> bool:
-    r = oc_run(
-        [
-            "get",
-            "deployment",
-            "maas-api",
-            "-n",
-            _MAAS_APPS_NS,
-            "-o",
-            "jsonpath={.status.readyReplicas}",
-        ],
-        check=False,
-        capture_output=True,
-        timeout=30,
-    )
-    if r.returncode != 0:
-        return False
-    try:
-        return int((r.stdout or "0").strip() or "0") >= 1
-    except ValueError:
-        return False
+    for ns in _MAAS_API_NS_CANDIDATES:
+        r = oc_run(
+            [
+                "get",
+                "deployment",
+                "maas-api",
+                "-n",
+                ns,
+                "-o",
+                "jsonpath={.status.readyReplicas}",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        if r.returncode != 0:
+            continue
+        try:
+            if int((r.stdout or "0").strip() or "0") >= 1:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _needs_maas_postgres_reset() -> bool:

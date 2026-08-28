@@ -12,7 +12,7 @@ from suite.errors import AppError
 
 
 def test_refresh_external_kubeconfig_skips_non_external(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CLUSTER_SOURCE", "EAAS")
+    monkeypatch.setenv("CLUSTER_SOURCE", "EPHC")
     assert mod.refresh_external_kubeconfig() == 0
 
 

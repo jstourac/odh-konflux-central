@@ -18,29 +18,36 @@ from suite.constants import (
     DEFAULT_UPSTREAM_KONFLUX_GIT,
     ITS_TEST_GATES_PARAM_DEFAULT,
     KONFLUX_INTEGRATION_SERVICE_ACCOUNT,
-    RHOAI_E2E_EAAS_ITS_NAME,
+    RHOAI_E2E_EPHC_ITS_NAME,
     RHOAI_FBCF_IMAGE_REF_PATTERN,
 )
 from suite.its_trigger_params import (
     is_external_cluster_source,
-    ocp_install_prefix,
     resolve_cluster_source_for_trigger,
-    resolve_version_display_params,
     validate_cluster_source,
 )
+from suite.trigger_param_registry import (
+    build_trigger_context_from_runner,
+    build_trigger_explicit_from_args,
+    read_committed_its_params,
+    resolve_trigger_patch_plan,
+    trigger_param_names,
+    trigger_params_to_clear_on_stage,
+)
 from suite.its_registry import integration_test_scenario_application
-from suite.rhoai_fbc_ocp import rhoai_fbc_name_from_ocp_minor
+from suite.rhoai_fbc_ocp import rhoai_fbc_name_from_ocp_minor, rhoai_fbc_name_from_rhoai_version
 from k8s.cluster_ocp_version import cluster_ocp_minor_from_kubeconfig
 from suite.pipelinerun_naming import build_olminstall_generate_prefix, default_pipelinerun_generate_prefix, is_olminstall_pipelinerun_name
 from suite.errors import AppError
-from k8s.external_kubeconfig import validate_kubeconfig_path, wait_for_external_cluster_idle
+from k8s.external_kubeconfig import (
+    assert_external_cluster_lock_queryable,
+    validate_kubeconfig_path,
+)
 from k8s.oc_util import filter_warning_lines, parse_json_output, run_cmd
 from .rhoai_channel import resolve_rhoai_update_channel
 from .runner_support import (
-    first_snapshot_component_name,
     format_olm_pipeline_watch_cli,
     pipelinerun_external_cluster_id,
-    refuse_owned_external_trigger_message,
     spin_while,
 )
 
@@ -107,81 +114,67 @@ class RunnerTriggerMixin:
             )
             self._yq_upsert_its_param(tmp_path, "SCRIPTS_REPO_REVISION", konflux_branch)
 
+    def _clear_registry_params_from_staged_its(self, tmp_path: Path | str) -> None:
+        names = sorted(trigger_params_to_clear_on_stage())
+        expr = " or ".join(f'.name == "{n}"' for n in names)
+        run_cmd(
+            ["yq", "e", f"del(.spec.params[] | select({expr}))", "-i", str(tmp_path)],
+            capture=True,
+            check=True,
+        )
+
     def _patch_its_cli_override_params(
         self, tmp_path: Path | str, odh_overrides: bool
     ) -> tuple[str, dict[str, str], str, str]:
-        """Upsert CLUSTER_SOURCE, version display, and optional test/cluster params on ITS tmp."""
-        cluster_source = self._cluster_source_for_its()
+        """Upsert trigger params on staged ITS via ``trigger_param_registry``."""
+        secret = (self.external_kubeconfig_secret or "").strip()
+        if not secret and self._external_kubeconfig_its_override():
+            secret = self._resolve_external_kubeconfig_secret()
+        committed = read_committed_its_params(self.its_file)
+        its_params: dict[str, str] = {}
+        for name in trigger_param_names():
+            value = self._read_its_param(name, path=tmp_path)
+            if value:
+                its_params[name] = value
+        explicit = build_trigger_explicit_from_args(self.args)
+        for key, value in (getattr(self.args, "trigger_explicit", {}) or {}).items():
+            if value is not None:
+                explicit[key] = value
+        ctx = build_trigger_context_from_runner(
+            self,
+            external_secret=secret,
+            odh_overrides=odh_overrides,
+            committed_its_params=committed,
+        )
+        values, patch_plan = resolve_trigger_patch_plan(
+            ctx,
+            its_params=its_params,
+            explicit=explicit,
+        )
+        cluster_source = values.get("CLUSTER_SOURCE", "")
         validate_cluster_source(cluster_source)
-
-        rhoai_fbc_name = self._effective_rhoai_fbc_name(odh_overrides=odh_overrides)
-        rhoai_fbc_image = self._effective_rhoai_fbc_image(odh_overrides=odh_overrides)
-        update_channel, _channel_explicit = self._effective_update_channel(
-            its_param_path=tmp_path
+        for name in trigger_param_names():
+            if patch_plan.get(name):
+                self._yq_upsert_its_param(tmp_path, name, values.get(name, ""))
+        if self.args.konflux_repo:
+            self._yq_set_resolver_ref_param(
+                tmp_path, "url", "YQ_RESOLVER_URL", self.args.konflux_repo
+            )
+        if self.args.konflux_branch:
+            self._yq_set_resolver_ref_param(
+                tmp_path, "revision", "YQ_RESOLVER_REV", self.args.konflux_branch
+            )
+        version_display = {
+            "RHOAI_VERSION": values.get("RHOAI_VERSION", ""),
+            "OCP_VERSION": values.get("OCP_VERSION", ""),
+            "RHOAI_FBC_IMAGE": values.get("RHOAI_FBC_IMAGE", ""),
+        }
+        return (
+            cluster_source,
+            version_display,
+            values.get("RHOAI_FBC_NAME", ""),
+            values.get("UPDATE_CHANNEL", "stable"),
         )
-        effective_ocp = ocp_install_prefix(
-            (self.args.ocp_version or "").strip()
-            or (getattr(self, "resolved_ocp_minor", "") or "").strip()
-        )
-        version_display = resolve_version_display_params(
-            product=self.args.product,
-            cli_version=self.args.version or "",
-            resolved_app=self.resolved_app or "",
-            update_channel=update_channel,
-            cluster_source=cluster_source,
-            cli_ocp=effective_ocp,
-            ocp_explicit=bool(effective_ocp),
-            rhoai_fbc_name=rhoai_fbc_name,
-            fbc_image=rhoai_fbc_image,
-            fbc_image_explicit=bool((self.args.image or "").strip()),
-        )
-        components_csv = (getattr(self.args, "components", "") or "").strip()
-        slack_channel = (self.args.slack_channel_id or "").strip()
-
-        for name, value in (
-            ("CLUSTER_SOURCE", cluster_source),
-            ("OCP_VERSION", version_display["OCP_VERSION"]),
-            ("PRODUCT", self.args.product),
-            ("RHOAI_VERSION", version_display["RHOAI_VERSION"]),
-            ("UPDATE_CHANNEL", update_channel),
-            ("RHOAI_FBC_IMAGE", version_display["RHOAI_FBC_IMAGE"]),
-        ):
-            self._yq_upsert_its_param(tmp_path, name, value)
-
-        if odh_overrides:
-            for name, value in (
-                ("OPERATOR_NAME", "rhods-operator"),
-                ("OPERATOR_NAMESPACE", "redhat-ods-operator"),
-                ("RHOAI_FBC_NAME", "odh-operator-catalog"),
-            ):
-                self._yq_upsert_its_param(tmp_path, name, value)
-        elif rhoai_fbc_name:
-            self._yq_upsert_its_param(tmp_path, "RHOAI_FBC_NAME", rhoai_fbc_name)
-
-        for active, name, value in (
-            (bool(effective_ocp), "OCP_VERSION_PREFIX", effective_ocp),
-            (self._cleanup_its_override(), "CLEANUP", "true"),
-            (getattr(self.args, "install_dependencies", False), "INSTALL_DEPENDENCIES", "true"),
-            (self._tests_its_override(), "TEST_GATES", self.args.tests),
-            (self._components_its_override() and bool(components_csv), "COMPONENTS", components_csv),
-            (self._test_timeout_its_override(), "COMPONENT_TEST_TIMEOUT", self.args.test_timeout),
-            (self._test_tags_its_override(), "TEST_TAGS", self.args.test_tags),
-            (bool(slack_channel), "SLACK_CHANNEL_ID", slack_channel),
-            (
-                self._tests_version_its_override(),
-                "OLMINSTALL_TESTS_VERSION_OVERRIDE",
-                self.args.tests_rhoai_version.strip(),
-            ),
-        ):
-            if active:
-                self._yq_upsert_its_param(tmp_path, name, value)
-
-        if self._smoke_aws_its_override():
-            smoke_aws_secret = self._resolve_smoke_aws_secret()
-            if smoke_aws_secret:
-                self._yq_upsert_its_param(tmp_path, "SMOKE_AWS_SECRET", smoke_aws_secret)
-
-        return cluster_source, version_display, rhoai_fbc_name, update_channel
 
     @staticmethod
     def _yq_append_its_param(tmp_path: str, name: str, value: str) -> None:
@@ -278,10 +271,11 @@ class RunnerTriggerMixin:
         apps: list[str],
         fbc_component_name: str,
         rhoai_version_label: str,
+        allow_fragment_app_fallback: bool = True,
     ) -> None:
         best_ts = ""
         for app in apps:
-            ts, img, snap_meta = self.latest_named_component_image(
+            ts, img, snap_meta = self.latest_named_component_image_on_application(
                 "rhoai-tenant",
                 app,
                 fbc_component_name,
@@ -294,15 +288,45 @@ class RunnerTriggerMixin:
                 self._fbc_source_snapshot_meta = snap_meta
         if self.image:
             return
-        ts, img, snap_meta = self.latest_matching_image(
+        if not allow_fragment_app_fallback:
+            return
+        fragment_ts = ""
+        fragment_img = ""
+        fragment_meta: dict[str, Any] | None = None
+        ts, img, snap_meta = self.latest_named_component_image_on_application(
             "rhoai-tenant",
+            fbc_component_name,
             fbc_component_name,
             RHOAI_FBCF_IMAGE_REF_PATTERN,
         )
-        if img:
-            self.image = img
+        if img and ts > fragment_ts:
+            fragment_ts = ts
+            fragment_img = img
+            fragment_meta = snap_meta
+        if fragment_img:
+            self.image = fragment_img
             self.resolved_app = fbc_component_name
-            self._fbc_source_snapshot_meta = snap_meta
+            self._fbc_source_snapshot_meta = fragment_meta
+            return
+        fallback_ts = ""
+        fallback_img = ""
+        fallback_app = ""
+        fallback_meta: dict[str, Any] | None = None
+        for app in apps:
+            ts, img, snap_meta = self.latest_matching_image(
+                "rhoai-tenant",
+                app,
+                RHOAI_FBCF_IMAGE_REF_PATTERN,
+            )
+            if img and ts > fallback_ts:
+                fallback_ts = ts
+                fallback_img = img
+                fallback_app = app
+                fallback_meta = snap_meta
+        if fallback_img:
+            self.image = fallback_img
+            self.resolved_app = fallback_app
+            self._fbc_source_snapshot_meta = fallback_meta
             return
         apps_s = ", ".join(sorted(apps))
         raise AppError(
@@ -408,9 +432,9 @@ class RunnerTriggerMixin:
         if self.image:
             print(f"Using provided image: {self.image}")
             self._resolve_rhoai_konflux_app()
-        elif self.args.product == "existing":
+        elif not self.args.product:
             print(
-                "INFO product=existing: skipping FBC catalog resolution; "
+                "INFO test-only (no --product): skipping FBC catalog resolution; "
                 "SNAPSHOT omits containerImage unless --image is set; "
                 "extract-fbcf-image records n/a."
             )
@@ -420,25 +444,65 @@ class RunnerTriggerMixin:
             ocp_minor = self._resolve_target_ocp_minor()
             if ocp_minor:
                 self.resolved_ocp_minor = ocp_minor
-                fbc_name = rhoai_fbc_name_from_ocp_minor(ocp_minor)
+            fbc_name = rhoai_fbc_name_from_ocp_minor(ocp_minor) if ocp_minor else ""
+            if fbc_name:
                 self.resolved_rhoai_fbc_name = fbc_name
-                with spin_while(
-                    f"Resolving FBCF image for RHOAI {self.args.version} / OCP {ocp_minor} ({fbc_name})"
-                ):
-                    apps = [
-                        a
-                        for a in self.get_applications("rhoai-tenant")
-                        if re.match(rf"^{re.escape(prefix)}(-|$)", a)
-                    ]
-                    if not apps:
-                        raise AppError(f"No Konflux application found matching {prefix}* in rhoai-tenant")
-                    self._resolve_rhoai_fbc_on_version_apps(
-                        apps=apps,
-                        fbc_component_name=fbc_name,
-                        rhoai_version_label=self.args.version,
+                apps = [
+                    a
+                    for a in self.get_applications("rhoai-tenant")
+                    if re.match(rf"^{re.escape(prefix)}(-|$)", a)
+                ]
+                if not apps:
+                    raise AppError(f"No Konflux application found matching {prefix}* in rhoai-tenant")
+                primary_app = prefix if prefix in apps else sorted(apps)[0]
+                ordered_apps = [primary_app] + sorted(a for a in apps if a != primary_app)
+                version_stream_fbc = rhoai_fbc_name_from_rhoai_version(self.args.version)
+                component_candidates: list[tuple[str, list[str]]] = []
+                if version_stream_fbc:
+                    component_candidates.append((version_stream_fbc, [primary_app]))
+                effective_channel = (self.args.channel or "").strip() or (
+                    resolve_rhoai_update_channel(
+                        version=self.args.version or "",
+                        resolved_app=primary_app,
                     )
+                    or ""
+                )
+                # stable-* needs the version-stream FBC (e.g. v3-5 GA channel); ocp-4XX catalogs
+                # may only publish beta/ea and will never satisfy stable-3.5 install.
+                skip_ocp_fbc = effective_channel.startswith("stable-")
+                if (
+                    fbc_name
+                    and all(comp != fbc_name for comp, _ in component_candidates)
+                    and not skip_ocp_fbc
+                ):
+                    component_candidates.append((fbc_name, ordered_apps))
+                resolved_comp = ""
+                for idx, (comp, lookup_apps) in enumerate(component_candidates):
+                    with spin_while(
+                        f"Resolving FBCF image for RHOAI {self.args.version} "
+                        f"({comp} on {', '.join(lookup_apps)})"
+                    ):
+                        self._resolve_rhoai_fbc_on_version_apps(
+                            apps=lookup_apps,
+                            fbc_component_name=comp,
+                            rhoai_version_label=self.args.version,
+                            allow_fragment_app_fallback=idx == len(component_candidates) - 1,
+                        )
+                    if self.image:
+                        resolved_comp = comp
+                        break
+                if not self.image:
+                    apps_s = ", ".join(sorted(apps))
+                    comps_s = ", ".join(comp for comp, _ in component_candidates)
+                    raise AppError(
+                        f"No FBCF snapshot found for RHOAI {self.args.version} "
+                        f"(components tried: {comps_s}; apps tried: {apps_s}). "
+                        "Pass --image <ref> or check Konflux snapshots."
+                    )
+                if resolved_comp:
+                    self.resolved_rhoai_fbc_name = resolved_comp
                 print(
-                    f"RHOAI {self.args.version} FBC image ({fbc_name}): {self.image} "
+                    f"RHOAI {self.args.version} FBC image ({self.resolved_rhoai_fbc_name}): {self.image} "
                     f"(from {self.resolved_app})"
                 )
             else:
@@ -570,66 +634,17 @@ class RunnerTriggerMixin:
         tests_baseline = getattr(self.args, "tests_catalog_default_csv", ITS_TEST_GATES_PARAM_DEFAULT)
         if not shutil.which("yq"):
             raise AppError(
-                "yq is required to patch the ITS (PRODUCT, --konflux-repo, --channel, etc.)."
+                "yq is required to patch the ITS (PRODUCT, --konflux-repo, --rhoai-channel, etc.)."
             )
 
         tmp = tempfile.NamedTemporaryFile(delete=False)
         tmp.close()
         self.its_apply_tmp = tmp.name
-        del_names: list[str] = ["PRODUCT"]
-        if self.args.konflux_repo:
-            del_names.append("SCRIPTS_REPO_URL")
-        if self.args.konflux_branch:
-            del_names.append("SCRIPTS_REPO_REVISION")
-        if self.args.ocp_version:
-            del_names.append("OCP_VERSION_PREFIX")
-        if odh_overrides:
-            del_names.extend(["OPERATOR_NAME", "OPERATOR_NAMESPACE", "RHOAI_FBC_NAME"])
-        if self._tests_its_override():
-            del_names.append("TEST_GATES")
-            del_names.append("TESTS")
-        if self._components_its_override():
-            del_names.append("COMPONENTS")
-        if self._test_timeout_its_override():
-            del_names.append("COMPONENT_TEST_TIMEOUT")
-        if self._test_tags_its_override():
-            del_names.append("TEST_TAGS")
-        if self._cleanup_its_override():
-            del_names.append("CLEANUP")
-        if (self.args.slack_channel_id or "").strip():
-            del_names.append("SLACK_CHANNEL_ID")
-        del_names.append("CLUSTER_SOURCE")
-        del_names.extend(
-            (
-                "RHOAI_VERSION",
-                "OCP_VERSION",
-                "UPDATE_CHANNEL",
-                "RHOAI_FBC_NAME",
-                "RHOAI_FBC_IMAGE",
-                # Legacy names removed on re-apply.
-                "FBCF_COMPONENT_NAME",
-                "FBCF_IMAGE_DISPLAY",
-                "UPDATE_CHANNEL_DISPLAY",
-                "SMOKE_AWS_SECRET",
-            )
-        )
-        if self._tests_version_its_override():
-            del_names.append("OLMINSTALL_TESTS_VERSION_OVERRIDE")
-
+        del_names = sorted(trigger_params_to_clear_on_stage())
         expr = " or ".join(f'.name == "{n}"' for n in del_names)
         proc = run_cmd(["yq", "e", f"del(.spec.params[] | select({expr}))", str(self.its_file)], capture=True, check=True)
         Path(self.its_apply_tmp).write_text(proc.stdout, encoding="utf-8")
 
-        if self.args.konflux_repo:
-            self._yq_append_its_param(self.its_apply_tmp, "SCRIPTS_REPO_URL", self.args.konflux_repo)
-            self._yq_set_resolver_ref_param(
-                self.its_apply_tmp, "url", "YQ_RESOLVER_URL", self.args.konflux_repo
-            )
-        if self.args.konflux_branch:
-            self._yq_append_its_param(self.its_apply_tmp, "SCRIPTS_REPO_REVISION", self.args.konflux_branch)
-            self._yq_set_resolver_ref_param(
-                self.its_apply_tmp, "revision", "YQ_RESOLVER_REV", self.args.konflux_branch
-            )
         cluster_source, version_display, rhoai_fbc_name, update_channel = (
             self._patch_its_cli_override_params(self.its_apply_tmp, odh_overrides)
         )
@@ -641,6 +656,7 @@ class RunnerTriggerMixin:
             cluster_label=self._trigger_cluster_label(),
             target_type=self._trigger_target_type(),
             tests_csv=self.args.tests,
+            components_csv=getattr(self.args, "components", "") or "",
             run_owner=self.run_owner,
         )
         self._pipelinerun_generate_prefix = generate_prefix
@@ -652,6 +668,7 @@ class RunnerTriggerMixin:
             f" SCRIPTS_REPO={self.args.konflux_repo or '<default>'}@{self.args.konflux_branch or '<default>'}"
             f" UPDATE_CHANNEL={update_channel}"
             f" OCP_VERSION_PREFIX={self.args.ocp_version or '<pipeline default>'}"
+            f" OCP_RELEASE_CHANNEL={getattr(self.args, 'ocp_channel', '') or '<pipeline default>'}"
             f" RHOAI_VERSION={version_display['RHOAI_VERSION']}"
             f" OCP_VERSION={version_display['OCP_VERSION']}"
             f" RHOAI_FBC_NAME={rhoai_fbc_name or '<ITS default>'}"
@@ -700,71 +717,6 @@ class RunnerTriggerMixin:
         return proc.stdout.strip().strip('"')
 
 
-    def _effective_update_channel(
-        self, *, its_param_path: Path | str | None = None
-    ) -> tuple[str, bool]:
-        explicit = bool((self.args.channel or "").strip())
-        if explicit:
-            return (self.args.channel or "").strip(), True
-        if self.update_channel_override:
-            return self.update_channel_override, False
-        if its_param_path is not None:
-            from_staged = self._read_its_param("UPDATE_CHANNEL", path=its_param_path)
-            if from_staged:
-                return from_staged, False
-        return self._read_its_param("UPDATE_CHANNEL") or "stable", False
-
-
-    def _effective_rhoai_fbc_name(self, *, odh_overrides: bool) -> str:
-        """Snapshot component id (not Konflux application name) for extract-fbcf-image."""
-        if odh_overrides:
-            return "odh-operator-catalog"
-        resolved = (getattr(self, "resolved_rhoai_fbc_name", "") or "").strip()
-        if resolved:
-            return resolved
-        for candidate in (
-            self._read_its_param("RHOAI_FBC_NAME"),
-            self._read_its_param("FBCF_COMPONENT_NAME"),
-        ):
-            if candidate:
-                return candidate
-        try:
-            return first_snapshot_component_name(self.snapshot_file.read_text(encoding="utf-8"))
-        except OSError:
-            return ""
-
-
-    def _effective_rhoai_fbc_image(self, *, odh_overrides: bool) -> str:
-        """FBC catalog pullspec for Konflux UI (resolved image or snapshot template)."""
-        img = (self.image or "").strip()
-        if img:
-            return img
-        if self.args.product == "existing":
-            return ""
-        try:
-            snap_yaml = self.snapshot_file.read_text(encoding="utf-8")
-        except OSError:
-            return ""
-        comp = self._effective_rhoai_fbc_name(odh_overrides=odh_overrides)
-        if comp:
-            match = re.search(
-                rf"(?ms)^\s+-\s+name:\s+{re.escape(comp)}\s*$\s+containerImage:\s+(\S+)",
-                snap_yaml,
-            )
-            if match:
-                return match.group(1).strip()
-        match = re.search(r"(?m)^\s+containerImage:\s+(\S+)", snap_yaml)
-        return match.group(1).strip() if match else ""
-
-
-    def _effective_fbcf_component_name(self, *, odh_overrides: bool) -> str:
-        return self._effective_rhoai_fbc_name(odh_overrides=odh_overrides)
-
-
-    def _effective_fbcf_image_for_display(self, *, odh_overrides: bool) -> str:
-        return self._effective_rhoai_fbc_image(odh_overrides=odh_overrides)
-
-
     def _snapshot_git_source(self) -> tuple[str, str]:
         """HTTPS git source for Snapshot ``spec.components[].source`` (Konflux Reference column)."""
         url = (getattr(self.args, "konflux_repo", "") or "").strip()
@@ -809,7 +761,7 @@ class RunnerTriggerMixin:
         container_image = img_match.group(1) if img_match else ""
         if self.image:
             container_image = self.image.strip()
-        elif self.args.product == "existing":
+        elif not self.args.product:
             container_image = ""
         if odh_overrides:
             comp_name = "odh-operator-catalog"
@@ -885,12 +837,6 @@ class RunnerTriggerMixin:
         pr_params.append({"name": "WAIT_FOR_CONFORMA", "value": "false"})
 
         force_cluster = bool(getattr(self.args, "force_cluster_run", False))
-        wait_for_external_cluster_idle(
-            namespace=self.args.namespace,
-            cluster_source=cluster_source,
-            cluster_id=self._trigger_cluster_label(),
-            force=force_cluster,
-        )
         if force_cluster:
             pr_params.append({"name": "FORCE_CLUSTER_RUN", "value": "true"})
 
@@ -1037,7 +983,7 @@ class RunnerTriggerMixin:
                 f"{self.konflux_ui}/ns/{self.args.namespace}/applications/{self.args.app}/activity/pipelineruns\n"
                 f"Snapshot: {self.snapshot_name}\n"
                 "If the Snapshot shows ``No required IntegrationTestScenarios found``, confirm "
-                f"``oc get integrationtestscenario -n {self.args.namespace} {RHOAI_E2E_EAAS_ITS_NAME}`` "
+                f"``oc get integrationtestscenario -n {self.args.namespace} {RHOAI_E2E_EPHC_ITS_NAME}`` "
                 "exists and was applied by this trigger (``olm_pipeline.py`` labels manual snapshots for "
                 "the ``push`` ITS context).\n"
                 f"When the run appears, follow logs with:\n  {watch_hint}"
@@ -1152,44 +1098,45 @@ class RunnerTriggerMixin:
             )
 
 
-    def _guard_external_cluster_before_trigger(
+    def _prepare_external_cluster_before_trigger(
         self,
         *,
         owned_running: str,
         items_by_name: dict[str, dict[str, Any]],
     ) -> None:
-        """Upload external kubeconfig if needed, refuse duplicate owned runs, wait before slow resolve."""
+        """Verify Konflux can evaluate cluster locks; idle wait runs in external-cluster-ready."""
         cluster_source = self._cluster_source_for_its()
         if not is_external_cluster_source(cluster_source):
             return
         force_cluster = bool(getattr(self.args, "force_cluster_run", False))
         target_cluster = self._trigger_cluster_label()
-        if owned_running:
-            owned_item = items_by_name.get(owned_running) or {}
-            watch_owned = format_olm_pipeline_watch_cli(
-                olminstall_dir=self.script_dir,
-                namespace=self.args.namespace,
-                app=self.args.app,
-                pipelinerun=owned_running,
-            )
-            refuse_msg = refuse_owned_external_trigger_message(
-                owned_name=owned_running,
-                owned_cluster_id=pipelinerun_external_cluster_id(
-                    owned_item,
-                    namespace=self.args.namespace,
-                ),
-                target_cluster_id=target_cluster,
-                watch_cli=watch_owned,
-                force=force_cluster,
-            )
-            if refuse_msg:
-                raise AppError(refuse_msg, 1)
-        wait_for_external_cluster_idle(
+        assert_external_cluster_lock_queryable(
             namespace=self.args.namespace,
             cluster_source=cluster_source,
             cluster_id=target_cluster,
             force=force_cluster,
         )
+        if not owned_running:
+            return
+        owned_item = items_by_name.get(owned_running) or {}
+        owned_cluster = pipelinerun_external_cluster_id(
+            owned_item,
+            namespace=self.args.namespace,
+        )
+        if not owned_cluster or not target_cluster or owned_cluster != target_cluster:
+            return
+        watch_owned = format_olm_pipeline_watch_cli(
+            olminstall_dir=self.script_dir,
+            namespace=self.args.namespace,
+            app=self.args.app,
+            pipelinerun=owned_running,
+        )
+        print(
+            f"INFO External cluster {target_cluster!r} is in use by owned PipelineRun "
+            f"{owned_running}; new run will queue in external-cluster-ready until idle.",
+            flush=True,
+        )
+        print(f"  Stream existing run: {watch_owned}", flush=True)
 
     def run_trigger_mode(self) -> None:
         self._apply_konflux_git_inference_from_clone_or_env()
@@ -1213,7 +1160,7 @@ class RunnerTriggerMixin:
             rows.append((item.get("metadata", {}).get("creationTimestamp", ""), name, snap, owner, pipe))
         rows.sort(key=lambda x: x[0], reverse=True)
         owned_running = self._pick_newest_owned_pipelinerun(rows)
-        self._guard_external_cluster_before_trigger(
+        self._prepare_external_cluster_before_trigger(
             owned_running=owned_running,
             items_by_name=items_by_name,
         )

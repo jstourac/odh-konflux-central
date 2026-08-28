@@ -9,7 +9,7 @@ from steps import prepare_bvt_dsc_ready as mod
 
 
 class PrepareBvtDscReadyTest(unittest.TestCase):
-    @patch.dict("os.environ", {"PRODUCT": "existing"}, clear=False)
+    @patch.dict("os.environ", {"PRODUCT": ""}, clear=False)
     def test_skips_for_existing_product(self) -> None:
         self.assertEqual(mod.prepare_bvt_dsc_ready(), 0)
 
@@ -19,6 +19,7 @@ class PrepareBvtDscReadyTest(unittest.TestCase):
         self.assertEqual(mod.prepare_bvt_dsc_ready(), 0)
 
     @patch.dict("os.environ", {"PRODUCT": "rhoai"}, clear=False)
+    @patch("steps.prepare_bvt_apps_namespace.wait_dashboard_pods_ready_for_bvt")
     @patch("components.maas_billing.wait.require_dsc_ready_for_bvt")
     @patch(
         "components.maas_billing.bbr_pre_processing.repair_payload_pre_processing_selector_conflict",
@@ -32,9 +33,11 @@ class PrepareBvtDscReadyTest(unittest.TestCase):
         _cleanup: object,
         _repair: object,
         wait_ready: object,
+        wait_pods: object,
     ) -> None:
         self.assertEqual(mod.prepare_bvt_dsc_ready(), 0)
         wait_ready.assert_called_once()
+        wait_pods.assert_called_once()
 
     @patch.dict("os.environ", {"PRODUCT": "rhoai"}, clear=False)
     @patch(
@@ -54,7 +57,9 @@ class PrepareBvtDscReadyTest(unittest.TestCase):
         _repair: object,
         _wait_ready: object,
     ) -> None:
-        self.assertEqual(mod.prepare_bvt_dsc_ready(), 1)
+        with patch("steps.prepare_bvt_apps_namespace.wait_dashboard_pods_ready_for_bvt") as wait_pods:
+            self.assertEqual(mod.prepare_bvt_dsc_ready(), 1)
+            wait_pods.assert_not_called()
 
 
 if __name__ == "__main__":

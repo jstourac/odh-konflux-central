@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from components.dashboard_cypress.verify_route import verify_dashboard_route_for_prepare
+from suite.constants import is_test_only_product
 from install.dsc_install import (
     _dsc_smoke_managed_components,
     batch_ensure_dsc_managed_for_smoke,
@@ -227,8 +228,8 @@ def _resync_maas_smoke_after_global_prep(smoke_id: str) -> bool:
 def _external_existing_cluster() -> bool:
     from suite.its_trigger_params import is_external_cluster_source
 
-    return is_external_cluster_source(os.environ.get("CLUSTER_SOURCE", "")) and (
-        os.environ.get("PRODUCT", "").strip().lower() == "existing"
+    return is_external_cluster_source(os.environ.get("CLUSTER_SOURCE", "")) and is_test_only_product(
+        os.environ.get("PRODUCT", "")
     )
 
 
@@ -438,7 +439,7 @@ def prepare_component_for_smoke(smoke_id: str) -> bool:
                     flush=True,
                 )
 
-    if smoke_id == "workbenches" and os.environ.get("PRODUCT", "").strip().lower() == "existing":
+    if smoke_id == "workbenches" and is_test_only_product(os.environ.get("PRODUCT", "")):
         try:
             ensure_rosa_hcp_imagestream_mirror()
         except Exception as exc:
@@ -487,6 +488,20 @@ def prepare_component_for_smoke(smoke_id: str) -> bool:
             print(
                 f"WARN: Kueue prerequisites for {smoke_id} not ready ({exc}); "
                 "RayJob smoke may fail until Kueue CRDs are available",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    if smoke_id == "platform":
+        try:
+            from components.platform.prep import ensure_platform_smoke_prereqs
+
+            ensure_platform_smoke_prereqs()
+        except Exception as exc:
+            ok = False
+            print(
+                f"WARN: platform MaaS prerequisites not ready ({exc}); "
+                "group_4 modelsasservice smoke may fail until modelsAsAService is ready",
                 file=sys.stderr,
                 flush=True,
             )

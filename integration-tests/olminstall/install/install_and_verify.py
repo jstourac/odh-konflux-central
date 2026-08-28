@@ -214,7 +214,7 @@ def idms_has_rhoai_mirror(spec: dict[str, Any]) -> bool:
 
 
 def ensure_rhoai_idms_mirror() -> None:
-    """Mirror registry.redhat.io/rhoai to quay.io/rhoai (EaaS provisioning default).
+    """Mirror registry.redhat.io/rhoai to quay.io/rhoai (EPHC provisioning default).
 
     External pooled clusters often lack this IDMS; OLM bundle-unpack then hangs until
     the unpack job deadline and fails with BundleUnpackFailed.

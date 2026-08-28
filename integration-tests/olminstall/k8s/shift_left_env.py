@@ -60,7 +60,7 @@ _CLUSTER_ROUTER_CA_PATH = Path("/tmp/olminstall-cluster-router-ca.pem")
 def apply_cluster_router_ca_from_kubeconfig(
     environ: MutableMapping[str, str] | None = None,
 ) -> bool:
-    """Prefer ingress router CA from the cluster under test (EaaS) over a stale tenant Secret."""
+    """Prefer ingress router CA from the cluster under test (EPHC) over a stale tenant Secret."""
     from .smoke_trusted_ca import fetch_ingress_router_ca_pem
 
     env: MutableMapping[str, str] = os.environ if environ is None else environ
@@ -84,7 +84,7 @@ def apply_cluster_router_ca_from_kubeconfig(
 
 
 def suppress_ephemeral_jira_env(environ: MutableMapping[str, str] | None = None) -> None:
-    """Drop Jenkins Jira-proxy env vars when no sidecar listens on localhost (Konflux/EaaS).
+    """Drop Jenkins Jira-proxy env vars when no sidecar listens on localhost (Konflux/EPHC).
 
     Shift-left secrets often set ``PYTEST_JIRA_URL=http://localhost:2990/jira``; without the
     proxy, pytest collection blocks ~100s on connection refused (tr274 / 7nxdt). When unset,

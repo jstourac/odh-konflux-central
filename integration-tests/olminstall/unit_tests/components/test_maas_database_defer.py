@@ -29,7 +29,7 @@ class MaasDatabaseDeferTest(unittest.TestCase):
 
     @patch("components.maas_billing.database._apps_namespace_ready_for_secrets", return_value=False)
     @patch("components.maas_billing.database._secret_exists", return_value=False)
-    @patch.dict(os.environ, {"PRODUCT": "existing"}, clear=False)
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
     def test_raises_on_existing_when_apps_namespace_missing(
         self,
         _secret_exists,

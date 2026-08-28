@@ -20,6 +20,7 @@ from suite.dsc_baseline import (
     wait_for_ready_reconcile,
     write_dsc_drift_marker,
     check_baseline_managed_ready_stale,
+    _dsc_reconcile_wait_timeout_sec,
 )
 
 class ExtractManagementStatesTest(unittest.TestCase):
@@ -165,6 +166,50 @@ class FilterDriftsForComponentTest(unittest.TestCase):
             )
         self.assertEqual(out, [])
 
+class CheckBaselineManagedReadyStaleTest(unittest.TestCase):
+    def test_no_baseline_returns_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(check_baseline_managed_ready_stale(Path(tmp)), set())
+
+    def test_deployments_not_ready_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".dsc-baseline.json").write_text(
+                json.dumps(
+                    {
+                        "dashboard": {"managementState": "Managed"},
+                        "workbenches": {"managementState": "Removed"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            import unittest.mock as mock
+
+            def _cond(ctype: str) -> tuple[str, str, str]:
+                if ctype == "DashboardReady":
+                    return ("False", "DeploymentsNotReady", "0/1 deployments ready")
+                return ("True", "", "")
+
+            with mock.patch("suite.component_dsc_gate._dsc_condition", side_effect=_cond):
+                stale = check_baseline_managed_ready_stale(root)
+            self.assertEqual(stale, {"dashboard"})
+
+    def test_ready_true_not_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".dsc-baseline.json").write_text(
+                json.dumps({"dashboard": {"managementState": "Managed"}}),
+                encoding="utf-8",
+            )
+            import unittest.mock as mock
+
+            with mock.patch(
+                "suite.component_dsc_gate._dsc_condition",
+                return_value=("True", "", ""),
+            ):
+                self.assertEqual(check_baseline_managed_ready_stale(root), set())
+
+
 class WaitForBaselineSpecTest(unittest.TestCase):
     def test_no_baseline_returns_true(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -282,13 +327,55 @@ class FinalizeComponentDscHygieneTest(unittest.TestCase):
             mock_restore.assert_called_once()
             mock_ready.assert_called_once_with({"dashboard", "mlflowoperator"})
 
+    def test_finalize_skips_ready_wait_when_restore_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            import unittest.mock as mock
+
+            with (
+                mock.patch("suite.dsc_baseline.check_dsc_drift", return_value=[]),
+                mock.patch(
+                    "suite.dsc_baseline.check_baseline_managed_ready_stale",
+                    return_value={"dashboard"},
+                ),
+                mock.patch(
+                    "suite.dsc_baseline.restore_dsc_from_baseline", return_value=False
+                ) as mock_restore,
+                mock.patch(
+                    "suite.dsc_baseline.wait_for_ready_reconcile", return_value=True
+                ) as mock_ready,
+            ):
+                out = finalize_component_dsc_hygiene("model_server", root)
+            self.assertEqual(out, [])
+            mock_restore.assert_called_once()
+            mock_ready.assert_not_called()
+
 class ReconcileBeforeComponentTest(unittest.TestCase):
+    def test_skips_when_cluster_api_already_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            import unittest.mock as mock
+
+            with (
+                mock.patch(
+                    "suite.cluster_api_health.cluster_smoke_infra_blocked_reason",
+                    return_value="cluster API unreachable: elb dead",
+                ),
+                mock.patch("suite.dsc_baseline.check_dsc_drift") as mock_drift,
+            ):
+                reconcile_baseline_dsc_before_component("mlflow", root)
+            mock_drift.assert_not_called()
+
     def test_reconcile_when_stale_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             import unittest.mock as mock
 
             with (
+                mock.patch(
+                    "suite.cluster_api_health.cluster_smoke_infra_blocked_reason",
+                    return_value="",
+                ),
                 mock.patch("suite.dsc_baseline.check_dsc_drift", return_value=[]),
                 mock.patch(
                     "suite.dsc_baseline.check_baseline_managed_ready_stale",
@@ -304,4 +391,50 @@ class ReconcileBeforeComponentTest(unittest.TestCase):
                 reconcile_baseline_dsc_before_component("mlflow", root)
             mock_restore.assert_called_once()
             mock_ready.assert_called_once_with({"mlflowoperator"})
+
+
+class WaitForReadyReconcileTest(unittest.TestCase):
+    def test_aborts_when_cluster_api_unreachable(self) -> None:
+        import unittest.mock as mock
+
+        with (
+            mock.patch(
+                "suite.component_dsc_gate._dsc_condition",
+                return_value=("False", "DeploymentsNotReady", ""),
+            ),
+            mock.patch(
+                "suite.cluster_api_health.cluster_api_unreachable_reason",
+                return_value="cluster API unreachable: no such host",
+            ),
+            mock.patch(
+                "steps.cluster_prep_state.mark_cluster_api_unreachable",
+            ) as mock_mark,
+        ):
+            ok = wait_for_ready_reconcile({"dashboard"}, timeout_sec=60)
+        self.assertFalse(ok)
+        mock_mark.assert_called_once_with("cluster API unreachable: no such host")
+
+
+class DscReconcileWaitTimeoutTest(unittest.TestCase):
+    def test_ephc_caps_default_wait(self) -> None:
+        import os
+
+        prior_source = os.environ.get("CLUSTER_SOURCE")
+        prior_default = os.environ.get("OLMINSTALL_DSC_RECONCILE_WAIT_SEC")
+        prior_cap = os.environ.get("OLMINSTALL_EPHC_DSC_RECONCILE_WAIT_SEC")
+        try:
+            os.environ["CLUSTER_SOURCE"] = "EPHC"
+            os.environ["OLMINSTALL_DSC_RECONCILE_WAIT_SEC"] = "600"
+            os.environ["OLMINSTALL_EPHC_DSC_RECONCILE_WAIT_SEC"] = "120"
+            self.assertEqual(_dsc_reconcile_wait_timeout_sec(), 120)
+        finally:
+            for key, val in (
+                ("CLUSTER_SOURCE", prior_source),
+                ("OLMINSTALL_DSC_RECONCILE_WAIT_SEC", prior_default),
+                ("OLMINSTALL_EPHC_DSC_RECONCILE_WAIT_SEC", prior_cap),
+            ):
+                if val is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = val
 

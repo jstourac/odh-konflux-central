@@ -9,8 +9,14 @@ from install.dsc_install import _build_dsc_smoke_yaml
 
 class BuildDscSmokeYamlTest(unittest.TestCase):
     def test_maas_billing_enables_kserve_models_as_service(self) -> None:
-        yaml_doc = _build_dsc_smoke_yaml("maas_billing")
+        yaml_doc = _build_dsc_smoke_yaml("maas_billing", operator_version="3.4.0")
         self.assertIn("modelsAsService:", yaml_doc)
+
+    def test_maas_billing_enables_aigateway_models_as_a_service_on_35(self) -> None:
+        yaml_doc = _build_dsc_smoke_yaml("maas_billing", operator_version="3.5.0")
+        self.assertIn("    aigateway:", yaml_doc)
+        self.assertIn("      modelsAsAService:", yaml_doc)
+        self.assertNotIn("      modelsAsService:", yaml_doc)
 
     def test_install_path_defers_models_as_service(self) -> None:
         yaml_doc = _build_dsc_smoke_yaml("maas_billing,model_server", enable_models_as_service=False)

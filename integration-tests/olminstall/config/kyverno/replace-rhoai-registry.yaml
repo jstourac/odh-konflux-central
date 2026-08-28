@@ -1,5 +1,5 @@
 # Rewrite registry.redhat.io/rhoai pulls to quay.io/rhoai (HyperShift substitute for IDMS).
-# LEGACY in-repo fallback only — Jenkins/Konflux EaaS uses Vault
+# LEGACY in-repo fallback only — Jenkins/Konflux EPHC uses Vault
 # rosahcp-quay-kyverno-authenticate (ClusterPolicy replace-image-registry) via tenant
 # secret olminstall-rosa-hcp-kyverno. Do not apply on HyperShift when Vault mount is present.
 apiVersion: kyverno.io/v1

@@ -12,20 +12,22 @@ from components.maas_billing.common import (
     _dsc_condition_types,
     _GATEWAY_NAME,
     _GATEWAY_NS,
+    _MAAS_APPS_NS,
     _maas_smoke_ready,
     maas_functional_smoke_ready,
     maas_smoke_acceptable_for_run,
+    models_as_service_ready_condition_type,
 )
 from components.maas_billing.timeouts import maas_dsc_prereq_grace_sec
 
 
 def _wait_for_maas_gateway_programmed(*, timeout_sec: int) -> None:
-    """Wait until gateway is smoke-ready (Programmed=True or EaaS functional fallback)."""
+    """Wait until gateway is smoke-ready (Programmed=True or EPHC functional fallback)."""
     from components.maas_billing.common import (
         _maas_gateway_programmed,
         _maas_gateway_ready_for_smoke,
     )
-    from install.gateway_config import cluster_source_is_eaas
+    from install.gateway_config import cluster_source_is_ephc
 
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
@@ -40,7 +42,7 @@ def _wait_for_maas_gateway_programmed(*, timeout_sec: int) -> None:
             else:
                 print(f"✓ {reason[:200]}", flush=True)
             return
-        if cluster_source_is_eaas() and "missing annotation" in reason:
+        if cluster_source_is_ephc() and "missing annotation" in reason:
             try:
                 from components.maas_billing.gateway import ensure_maas_gateway
 
@@ -108,7 +110,7 @@ def _nudge_maas_gateway_reconcile() -> None:
 
 
 def _dump_maas_gateway_https_diagnostics() -> None:
-    """Best-effort cluster dump when HTTPS Service wait fails (EaaS Programmed gaps)."""
+    """Best-effort cluster dump when HTTPS Service wait fails (EPHC Programmed gaps)."""
     cmds = (
         ["get", "gatewayclass", "-o", "wide"],
         ["get", "gateway", _GATEWAY_NAME, "-n", _GATEWAY_NS, "-o", "yaml"],
@@ -150,12 +152,18 @@ def _dump_maas_gateway_https_diagnostics() -> None:
         )
 
 
+def _maas_gateway_https_wait_detail(svc_detail: str) -> str:
+    from components.maas_billing.common import _maas_gateway_programmed
+
+    programmed, prog_detail = _maas_gateway_programmed()
+    if programmed:
+        return f"Programmed=True but {svc_detail}"
+    return prog_detail or svc_detail
+
+
 def _wait_maas_gateway_https_service(*, timeout_sec: int) -> None:
-    """Wait until maas-api can resolve the gateway-owned HTTPS service (strict; no EaaS fallback)."""
-    from components.maas_billing.common import (
-        _maas_gateway_https_service_ready,
-        _maas_gateway_programmed,
-    )
+    """Wait until maas-api can resolve the gateway-owned HTTPS service (strict; no EPHC fallback)."""
+    from components.maas_billing.common import _maas_gateway_https_service_ready
 
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
@@ -163,11 +171,7 @@ def _wait_maas_gateway_https_service(*, timeout_sec: int) -> None:
         if svc_ready:
             print(f"✓ MaaS gateway HTTPS service ready ({svc_detail})", flush=True)
             return
-        programmed, prog_detail = _maas_gateway_programmed()
-        if programmed:
-            detail = f"Programmed=True but {svc_detail}"
-        else:
-            detail = prog_detail or svc_detail
+        detail = _maas_gateway_https_wait_detail(svc_detail)
         if int(time.time()) % 30 < 12:
             print(f"Waiting for MaaS gateway HTTPS service: {detail[:120]}", flush=True)
         time.sleep(12)
@@ -178,11 +182,8 @@ def _wait_maas_gateway_https_service(*, timeout_sec: int) -> None:
 
 
 def _wait_maas_gateway_https_for_models_as_service(*, timeout_sec: int) -> None:
-    """modelsAsService requires gateway-owned HTTPS; EaaS functional fallback is insufficient."""
-    from components.maas_billing.common import (
-        _maas_gateway_https_service_ready,
-        _maas_gateway_programmed,
-    )
+    """modelsAsService requires gateway-owned HTTPS; EPHC functional fallback is insufficient."""
+    from components.maas_billing.common import _maas_gateway_https_service_ready
     from steps.cluster_prep_state import (
         maas_gateway_https_blocked_reason,
         mark_maas_gateway_https_failed,
@@ -204,11 +205,7 @@ def _wait_maas_gateway_https_for_models_as_service(*, timeout_sec: int) -> None:
         if now - last_nudge >= 60:
             last_nudge = now
             _nudge_maas_gateway_reconcile()
-        programmed, prog_detail = _maas_gateway_programmed()
-        if programmed:
-            detail = f"Programmed=True but {svc_detail}"
-        else:
-            detail = prog_detail or svc_detail
+        detail = _maas_gateway_https_wait_detail(svc_detail)
         if int(now) % 30 < 12:
             print(
                 f"Waiting for MaaS gateway HTTPS service (modelsAsService gate): {detail[:120]}",
@@ -247,16 +244,17 @@ def _wait_for_maas_smoke_ready(*, timeout_sec: int) -> None:
             f"{timeout_sec}s — {reason[:300]}"
         )
 
+    maas_ready_type = models_as_service_ready_condition_type()
     require_prereq = "MaaSPrerequisitesAvailable" in _dsc_condition_types()
     if require_prereq:
         ready_label = (
-            "MaaSPrerequisitesAvailable + ModelsAsServiceReady + DSC Ready"
+            f"MaaSPrerequisitesAvailable + {maas_ready_type} + DSC Ready"
         )
     else:
-        ready_label = "ModelsAsServiceReady + DSC Ready (MaaSPrerequisitesAvailable not exposed)"
+        ready_label = f"{maas_ready_type} + DSC Ready (MaaSPrerequisitesAvailable not exposed)"
         print(
             "NOTE: DSC has no MaaSPrerequisitesAvailable condition on this cluster; "
-            "waiting for ModelsAsServiceReady + DSC Ready only",
+            f"waiting for {maas_ready_type} + DSC Ready only",
             flush=True,
         )
 
@@ -264,8 +262,10 @@ def _wait_for_maas_smoke_ready(*, timeout_sec: int) -> None:
     started = time.time()
     deadline = started + timeout_sec
     grace_deadline = started + grace_sec
+    last_nudge = 0.0
 
     while time.time() < deadline:
+        maas_ready_type = models_as_service_ready_condition_type()
         acceptable, accept_reason = maas_smoke_acceptable_for_run()
         if acceptable:
             if "lagging" in accept_reason or "DSC Ready=False" in accept_reason:
@@ -274,16 +274,47 @@ def _wait_for_maas_smoke_ready(*, timeout_sec: int) -> None:
             return
 
         prereq_status, _, prereq_msg = _dsc_condition("MaaSPrerequisitesAvailable")
-        maas_status, _, maas_msg = _dsc_condition("ModelsAsServiceReady")
+        maas_status, _, maas_msg = _dsc_condition(maas_ready_type)
         ready_status, _, ready_msg = _dsc_condition("Ready")
 
-        if time.time() >= grace_deadline:
+        now = time.time()
+        if now - last_nudge >= 60:
+            last_nudge = now
+            from install.dsc_install import (
+                ensure_aigateway_models_as_a_service_managed,
+                uses_aigateway_models_as_a_service,
+            )
+
+            if uses_aigateway_models_as_a_service() and maas_status != "True":
+                try:
+                    ensure_aigateway_models_as_a_service_managed(wait_timeout_sec=30)
+                except Exception as exc:
+                    print(
+                        f"WARN: default-aigateway reconcile during MaaS wait: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+        if now >= grace_deadline:
             func_ready, func_reason = maas_functional_smoke_ready()
-            if maas_status == "True" and func_ready and ready_status == "True":
+            if func_ready and ready_status == "True" and (
+                maas_status == "True"
+                or (not require_prereq or prereq_status == "True")
+            ):
                 print(
                     "WARN: accepting MaaS smoke after grace period "
-                    f"({grace_sec}s) — functional ready but DSC MaaSPrerequisites "
-                    f"still {(prereq_status or '?')}: {(prereq_msg or func_reason)[:120]}",
+                    f"({grace_sec}s) — functional ready"
+                    + (
+                        f" but DSC MaaSPrerequisites still {(prereq_status or '?')}: "
+                        f"{(prereq_msg or func_reason)[:120]}"
+                        if require_prereq and prereq_status != "True" and maas_status == "True"
+                        else (
+                            f" ({maas_ready_type} lagging: "
+                            f"{(maas_msg or func_reason or 'reconciling')[:120]})"
+                            if maas_status != "True"
+                            else ""
+                        )
+                    ),
                     file=sys.stderr,
                     flush=True,
                 )
@@ -306,7 +337,7 @@ def _wait_for_maas_smoke_ready(*, timeout_sec: int) -> None:
         return
 
     prereq_status, _, prereq_msg = _dsc_condition("MaaSPrerequisitesAvailable")
-    maas_status, _, maas_msg = _dsc_condition("ModelsAsServiceReady")
+    maas_status, _, maas_msg = _dsc_condition(maas_ready_type)
     ready_status, _, ready_msg = _dsc_condition("Ready")
     prereq_display = prereq_status if require_prereq else "n/a"
     raise RuntimeError(
@@ -369,37 +400,84 @@ def _wait_for_dsc_ready(*, timeout_sec: int) -> None:
     )
 
 
-def require_dsc_ready_for_bvt(*, timeout_sec: int) -> None:
-    """Block operator_health BVT until DSC Ready (pytest wait is only 120s)."""
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
+_DASHBOARD_DEPLOY_NAMES = ("rhods-dashboard", "odh-dashboard")
+
+
+def _dashboard_deploy_available() -> bool:
+    """True when the RHOAI/ODH dashboard Deployment is Available."""
+    for name in _DASHBOARD_DEPLOY_NAMES:
         r = oc_run(
             [
                 "get",
-                "datasciencecluster",
-                "default-dsc",
+                "deploy",
+                name,
+                "-n",
+                _MAAS_APPS_NS,
                 "-o",
-                "jsonpath={.status.conditions[?(@.type=='Ready')].status}",
+                "jsonpath={.status.conditions[?(@.type=='Available')].status}",
             ],
             check=False,
             capture_output=True,
             timeout=30,
         )
         if (r.stdout or "").strip() == "True":
-            print("✓ DataScienceCluster/default-dsc Ready (BVT gate)", flush=True)
-            return
-        if int(time.time()) % 60 < 12:
-            status, reason, msg = _dsc_condition("ModelsAsServiceReady")
-            print(
-                "Waiting for DSC Ready before operator_health BVT "
-                f"(ModelsAsServiceReady={status or '?'} reason={reason or '?'}): "
-                f"{(msg or 'reconciling...')[:120]}",
-                flush=True,
+            return True
+    return False
+
+
+def _dsc_and_dashboard_ready_for_bvt() -> tuple[bool, str]:
+    """Ready for operator_health BVT: DSC Ready, DashboardReady when present, deploy Available."""
+    ready, reason, msg = _dsc_condition("Ready")
+    if ready != "True":
+        return False, f"Ready={ready or '?'} reason={reason or '?'} {(msg or '')[:120]}"
+    types = _dsc_condition_types()
+    if "DashboardReady" in types:
+        dstatus, dreason, dmsg = _dsc_condition("DashboardReady")
+        if dstatus != "True":
+            return False, (
+                f"DashboardReady={dstatus or '?'} reason={dreason or '?'} {(dmsg or '')[:120]}"
             )
+    if not _dashboard_deploy_available():
+        return False, f"dashboard Deployment not Available in {_MAAS_APPS_NS}"
+    return True, "Ready+DashboardReady"
+
+
+def require_dsc_ready_for_bvt(*, timeout_sec: int) -> None:
+    """Block operator_health BVT until DSC Ready and dashboard stay healthy (pytest wait is 120s)."""
+    from components.maas_billing.timeouts import bvt_dsc_ready_settle_sec
+
+    settle_sec = max(0, bvt_dsc_ready_settle_sec())
+    deadline = time.time() + timeout_sec
+    stable_since: float | None = None
+    last_detail = "reconciling..."
+    while time.time() < deadline:
+        ok, detail = _dsc_and_dashboard_ready_for_bvt()
+        last_detail = detail
+        if ok:
+            if settle_sec <= 0:
+                print(f"✓ DataScienceCluster/default-dsc {detail} (BVT gate)", flush=True)
+                return
+            if stable_since is None:
+                stable_since = time.time()
+                print(
+                    f"✓ DataScienceCluster/default-dsc {detail}; "
+                    f"settling {settle_sec}s before operator_health BVT",
+                    flush=True,
+                )
+            elif time.time() - stable_since >= settle_sec:
+                print(
+                    f"✓ DataScienceCluster/default-dsc {detail} stable (BVT gate)",
+                    flush=True,
+                )
+                return
+        else:
+            stable_since = None
+            if int(time.time()) % 60 < 12:
+                print(
+                    f"Waiting for DSC+dashboard before operator_health BVT: {detail}",
+                    flush=True,
+                )
         time.sleep(10)
-    status, reason, msg = _dsc_condition("ModelsAsServiceReady")
     raise RuntimeError(
-        f"DSC not Ready after {timeout_sec}s before operator_health BVT "
-        f"(ModelsAsServiceReady={status or '?'}, reason={reason or '?'}): "
-        f"{(msg or 'reconcile incomplete')[:300]}"
+        f"DSC/dashboard not Ready after {timeout_sec}s before operator_health BVT: {last_detail[:300]}"
     )

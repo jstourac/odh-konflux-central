@@ -2,7 +2,7 @@
 """Extract the FBCF container image from a Konflux ApplicationSnapshot JSON.
 
 Env: SNAPSHOT (JSON string), COMPONENT_NAME, RESULT_PATH (Tekton result file).
-Optional PRODUCT: when ``existing``, writes ``n/a`` and skips snapshot parsing (no install).
+Optional PRODUCT: when test-only (empty), writes ``n/a`` and skips snapshot parsing (no install).
 """
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ _FBCF_NOT_APPLICABLE = "n/a"
 
 
 def _product_skips_fbcf_extraction(product: str) -> bool:
-    return (product or "").strip().lower() == "existing"
+    from suite.constants import is_test_only_product
+
+    return is_test_only_product(product)
 
 
 def _write_fbcf_result(result_path: str, value: str) -> int:
@@ -51,7 +53,7 @@ def main() -> int:
     result_path = os.environ.get("RESULT_PATH", "").strip()
 
     if _product_skips_fbcf_extraction(product):
-        print(f"✓ PRODUCT={product or 'existing'} — FBC catalog extract skipped ({_FBCF_NOT_APPLICABLE})")
+        print(f"✓ test-only PRODUCT — FBC catalog extract skipped ({_FBCF_NOT_APPLICABLE})")
         return _write_fbcf_result(result_path, _FBCF_NOT_APPLICABLE)
 
     if not snapshot_raw:

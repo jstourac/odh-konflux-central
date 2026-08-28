@@ -14,7 +14,7 @@ spec:
       description: Cypress runtime image (clone odh-dashboard at test time; not baked odh-cypress)
     - name: PRODUCT
       type: string
-      default: "existing"
+      default: ""
     - name: CLUSTER_SOURCE
       type: string
       default: ""
@@ -32,7 +32,7 @@ spec:
       default: ""
     - name: COMPONENT_VAULT_SECRET
       type: string
-      default: "unused-component-vault-secret"
+      default: "vault-approle"
     - name: ARTIFACT_BROWSER_URL
       type: string
     - name: ARTIFACT_BROWSER_REPO_PATH
@@ -47,16 +47,32 @@ spec:
     - name: TASK_MESSAGE
       description: Pass/fail summary for Konflux task Results panel
   volumes:
-    - name: component-vault-credentials
+    - name: vault-approle
+      secret:
+        secretName: vault-approle
+        optional: true
+    - name: tenant-test-secrets
       secret:
         optional: true
         secretName: $(params.COMPONENT_VAULT_SECRET)
+    - name: component-vault-credentials
+      emptyDir:
+        medium: Memory
   steps:
     # run_component_golang writes component-golang.env consumed by run-cypress-tests.
     - name: orchestrate-cypress-test
       displayName: Prepare Cypress test run
       onError: continue
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
+      volumeMounts:
+        - name: vault-approle
+          mountPath: /vault-approle
+          readOnly: true
+        - name: tenant-test-secrets
+          mountPath: /tenant-test-secrets
+          readOnly: true
+        - name: component-vault-credentials
+          mountPath: /component-vault-credentials
       env:
         - name: KUBECONFIG
           value: $(workspaces.tests-shared.path)/credentials/kubeconfig
@@ -104,9 +120,14 @@ spec:
           memory: 4Gi
           cpu: "1"
       volumeMounts:
+        - name: vault-approle
+          mountPath: /vault-approle
+          readOnly: true
+        - name: tenant-test-secrets
+          mountPath: /tenant-test-secrets
+          readOnly: true
         - name: component-vault-credentials
           mountPath: /component-vault-credentials
-          readOnly: true
       env:
         - name: KUBECONFIG
           value: $(workspaces.tests-shared.path)/credentials/kubeconfig

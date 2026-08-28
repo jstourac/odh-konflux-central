@@ -168,7 +168,7 @@ def test_cluster_label_from_cluster_source_sanitizes_body() -> None:
         )
         == "ods-qe-psi-23"
     )
-    assert _cluster_label_from_cluster_source("EAAS") == ""
+    assert _cluster_label_from_cluster_source("EPHC") == ""
 
 
 def test_resolve_cypress_cluster_label_cluster_source_without_dashboard_url() -> None:

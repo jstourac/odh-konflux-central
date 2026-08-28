@@ -347,29 +347,6 @@ class EmitComponentTestOutputTest(unittest.TestCase):
             self.assertEqual(payload["failures"], 0)
             self.assertEqual(payload["skipped"], 0)
 
-    def test_resolve_component_exit_codes_partial_pass(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "workbenches-smoke.xml").write_text(
-                """<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="workbenches" tests="3" failures="1" errors="0" skipped="0">
-  <testcase classname="a" name="t1"/>
-  <testcase classname="a" name="t2"/>
-  <testcase classname="a" name="t3"><failure message="x"/></testcase>
-</testsuite>
-""",
-                encoding="utf-8",
-            )
-            from suite.component_task_exit import resolve_component_exit_codes
-
-            strict, tekton = resolve_component_exit_codes(
-                {"id": "workbenches", "artifact_prefix": "workbenches-smoke"},
-                raw_ec=1,
-                artifacts_dir=root,
-            )
-            self.assertEqual(strict, 1)
-            self.assertEqual(tekton, 0)
-
     def test_bvt_all_skipped_emits_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

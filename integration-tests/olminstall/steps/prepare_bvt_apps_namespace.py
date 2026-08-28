@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 
 from install.dsc_install import oc_run
 
 _APPS_NS = "redhat-ods-applications"
+_DASHBOARD_POD_PREFIXES = ("rhods-dashboard-", "odh-dashboard-")
 _MLFLOW_MIGRATION_PREFIX = "mlflow-mg-"
 _MLFLOW_MIGRATION_JOB_RE = re.compile(r"^mlflow-mg-(\d+)-g\d+$")
 _MLFLOW_QUIESCE_ROUNDS = 3
@@ -127,30 +129,13 @@ def _patch_mlflow_status_version(version: str) -> None:
 
 
 def _delete_mlflow_migration_jobs(namespace: str) -> None:
-    r = oc_run(
-        [
-            "get",
-            "jobs",
-            "-n",
-            namespace,
-            "-o",
-            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
-        ],
-        check=False,
-        capture_output=True,
-        timeout=30,
-    )
-    if r.returncode != 0:
-        return
-    for job in (r.stdout or "").splitlines():
-        name = job.strip()
-        if name.startswith(_MLFLOW_MIGRATION_PREFIX):
-            oc_run(
-                ["delete", "job", name, "-n", namespace, "--ignore-not-found"],
-                check=False,
-                capture_output=True,
-                timeout=60,
-            )
+    for name in _list_mlflow_migration_job_names(namespace):
+        oc_run(
+            ["delete", "job", name, "-n", namespace, "--ignore-not-found"],
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
 
 
 def _resolve_mlflow_migration_version(namespace: str) -> str:
@@ -502,6 +487,78 @@ def resume_mlflow_operator_reconcile(*, namespace: str = _APPS_NS, prior_replica
         flush=True,
     )
     _scale_mlflow_operator(namespace, prior_replicas)
+
+
+def _dashboard_pod_blockers(namespace: str = _APPS_NS) -> list[str]:
+    """Return dashboard pods that are not Running+Ready (or a missing-pod marker)."""
+    r = oc_run(
+        ["get", "pods", "-n", namespace, "-o", "json"],
+        check=False,
+        capture_output=True,
+        timeout=60,
+    )
+    if r.returncode != 0:
+        return ["dashboard pod list failed"]
+    try:
+        doc = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        return ["dashboard pod list invalid"]
+    matching = 0
+    blockers: list[str] = []
+    for item in doc.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str((item.get("metadata") or {}).get("name") or "")
+        if not name.startswith(_DASHBOARD_POD_PREFIXES):
+            continue
+        matching += 1
+        phase = str((item.get("status") or {}).get("phase") or "")
+        statuses = (item.get("status") or {}).get("containerStatuses") or []
+        ready = bool(statuses) and all(
+            bool(cs.get("ready")) for cs in statuses if isinstance(cs, dict)
+        )
+        if phase != "Running" or not ready:
+            blockers.append(f"{name}:{phase or '?'}")
+    if matching == 0:
+        return ["no dashboard pods"]
+    return blockers
+
+
+def wait_dashboard_pods_ready_for_bvt(
+    *, timeout_sec: int | None = None, namespace: str = _APPS_NS
+) -> None:
+    """Block operator_health BVT until dashboard pods are Running (pytest wait is 180s)."""
+    if timeout_sec is None:
+        raw = (os.environ.get("BVT_DASHBOARD_POD_WAIT_SEC") or "").strip()
+        try:
+            timeout_sec = int(raw) if raw else 600
+        except ValueError:
+            print(
+                f"WARN: invalid BVT_DASHBOARD_POD_WAIT_SEC={raw!r}; using 600s",
+                flush=True,
+            )
+            timeout_sec = 600
+    deadline = time.time() + timeout_sec
+    last = "reconciling..."
+    while time.time() < deadline:
+        blockers = _dashboard_pod_blockers(namespace)
+        if not blockers:
+            print(
+                f"✓ dashboard pods Running in {namespace} (BVT gate)",
+                flush=True,
+            )
+            return
+        last = ", ".join(blockers[:8])
+        if int(time.time()) % 60 < 12:
+            print(
+                f"Waiting for dashboard pods before operator_health BVT: {last}",
+                flush=True,
+            )
+        time.sleep(10)
+    raise RuntimeError(
+        f"dashboard pods not Running in {namespace} after {timeout_sec}s "
+        f"before operator_health BVT: {last[:300]}"
+    )
 
 
 def reconcile_stuck_mlflow_migration_pods_for_bvt(*, namespace: str = _APPS_NS) -> None:

@@ -10,7 +10,7 @@ from unittest import mock
 
 from components.codeflare_sdk.auth import (  # noqa: E402
     codeflare_dashboard_url_overlay,
-    codeflare_eaas_kubeconfig_overlay,
+    codeflare_ephc_kubeconfig_overlay,
     codeflare_env_overrides_from_vault,
     codeflare_htpasswd_test_user_overlay,
     read_flat_vault_env,
@@ -126,7 +126,7 @@ class CodeflareSdkAuthTest(unittest.TestCase):
             (root / "OCP_ADMIN_USER_PASSWORD").write_text("pw", encoding="utf-8")
             with mock.patch("components.codeflare_sdk.auth._cluster_is_byoidc", return_value=True):
                 with mock.patch("components.codeflare_sdk.auth.codeflare_byoidc_test_user_overlay", return_value={}):
-                    with mock.patch("components.codeflare_sdk.auth.codeflare_eaas_kubeconfig_overlay", return_value={}):
+                    with mock.patch("components.codeflare_sdk.auth.codeflare_ephc_kubeconfig_overlay", return_value={}):
                         with mock.patch(
                             "components.codeflare_sdk.auth.cluster_has_htpasswd_identity",
                             return_value=True,
@@ -134,21 +134,21 @@ class CodeflareSdkAuthTest(unittest.TestCase):
                             overlay = codeflare_env_overrides_from_vault(root)
             self.assertEqual(overlay["TEST_USER_USERNAME"], "htpasswd-cluster-admin-user")
 
-    def test_eaas_kubeconfig_overlay_when_no_idp(self) -> None:
-        with mock.patch.dict("os.environ", {"CLUSTER_SOURCE": "EAAS", "OPENSHIFT_TOKEN": "tok123"}, clear=False):
+    def test_ephc_kubeconfig_overlay_when_no_idp(self) -> None:
+        with mock.patch.dict("os.environ", {"CLUSTER_SOURCE": "EPHC", "OPENSHIFT_TOKEN": "tok123"}, clear=False):
             with mock.patch("components.codeflare_sdk.auth._cluster_is_byoidc", return_value=False):
                 with mock.patch("components.codeflare_sdk.auth.cluster_has_htpasswd_identity", return_value=False):
-                    overlay = codeflare_eaas_kubeconfig_overlay()
+                    overlay = codeflare_ephc_kubeconfig_overlay()
         self.assertEqual(overlay["CLUSTER_AUTH"], "openshift")
         self.assertEqual(overlay["OPENSHIFT_TOKEN"], "tok123")
         self.assertEqual(overlay["OC_TOKEN"], "tok123")
         self.assertEqual(overlay["OCP_ADMIN_USER_USERNAME"], "")
 
-    def test_eaas_env_overrides_fall_back_to_token(self) -> None:
+    def test_ephc_env_overrides_fall_back_to_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "OCP_ADMIN_USER_USERNAME").write_text("htpasswd-cluster-admin-user", encoding="utf-8")
-            with mock.patch.dict("os.environ", {"CLUSTER_SOURCE": "EAAS", "OC_TOKEN": "tok456"}, clear=False):
+            with mock.patch.dict("os.environ", {"CLUSTER_SOURCE": "EPHC", "OC_TOKEN": "tok456"}, clear=False):
                 with mock.patch("components.codeflare_sdk.auth._cluster_is_byoidc", return_value=False):
                     with mock.patch("components.codeflare_sdk.auth.cluster_has_htpasswd_identity", return_value=False):
                         overlay = codeflare_env_overrides_from_vault(root)
@@ -185,7 +185,7 @@ class CodeflareSdkAuthTest(unittest.TestCase):
             )
             with mock.patch("components.codeflare_sdk.auth._cluster_is_byoidc", return_value=False):
                 with mock.patch("components.codeflare_sdk.auth.cluster_has_htpasswd_identity", return_value=False):
-                    with mock.patch.dict("os.environ", {"CLUSTER_SOURCE": "EAAS", "OC_TOKEN": "tok"}, clear=False):
+                    with mock.patch.dict("os.environ", {"CLUSTER_SOURCE": "EPHC", "OC_TOKEN": "tok"}, clear=False):
                         overlay = codeflare_env_overrides_from_vault(artifacts_dir=results)
         self.assertEqual(overlay["ODH_DASHBOARD_URL"], "https://dash.example.com")
         self.assertEqual(overlay["OC_TOKEN"], "tok")

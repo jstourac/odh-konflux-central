@@ -49,3 +49,15 @@ class ComponentJunitTest(unittest.TestCase):
             self.assertEqual(counts["total"], 3)
             self.assertEqual(counts["failures"], 1)
 
+    def test_zero_tests_returns_counts_not_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "zero.xml"
+            suite = ET.Element("testsuite", {"name": "Empty", "tests": "0", "failures": "0"})
+            ET.ElementTree(suite).write(path, encoding="unicode", xml_declaration=True)
+
+            counts = junit_counts(path)
+            self.assertIsNotNone(counts)
+            assert counts is not None
+            self.assertEqual(counts["total"], 0)
+            self.assertEqual(counts["failures"], 0)
+

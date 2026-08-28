@@ -466,29 +466,6 @@ def pipelinerun_external_cluster_id(item: dict[str, Any], *, namespace: str) -> 
     return resolved or cluster_label_from_cluster_source(source)
 
 
-def refuse_owned_external_trigger_message(
-    *,
-    owned_name: str,
-    owned_cluster_id: str,
-    target_cluster_id: str,
-    watch_cli: str,
-    force: bool,
-) -> str | None:
-    """Return refusal text when an owned run still holds the same external cluster."""
-    if force or not owned_name:
-        return None
-    owned = (owned_cluster_id or "").strip()
-    target = (target_cluster_id or "").strip()
-    if not owned or not target or owned != target:
-        return None
-    return (
-        f"Refusing to start a new olminstall run on external cluster {target!r}: "
-        f"owned PipelineRun {owned_name} is still active. "
-        f"Watch with:\n  {watch_cli}\n"
-        "Pass --force-cluster-run to override."
-    )
-
-
 class Tee:
     def __init__(self, *streams: Any) -> None:
         self.streams = streams

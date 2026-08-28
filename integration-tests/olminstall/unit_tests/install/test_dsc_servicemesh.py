@@ -28,7 +28,7 @@ class SmokeServiceMeshTest(unittest.TestCase):
     def test_workbenches_only_does_not_need_servicemesh(self) -> None:
         self.assertFalse(_smoke_components_need_servicemesh("workbenches,model_registry"))
 
-    def test_ai_safety_uses_kserve_raw_deployment_on_eaas(self) -> None:
+    def test_ai_safety_uses_kserve_raw_deployment_on_ephc(self) -> None:
         self.assertTrue(smoke_components_use_kserve_raw_deployment("ai_safety"))
         self.assertTrue(smoke_components_use_kserve_raw_deployment("workbenches,ai_safety"))
 
@@ -38,7 +38,7 @@ class SmokeServiceMeshTest(unittest.TestCase):
         managed = _dsc_smoke_managed_components("model_registry", defer_for_install=True)
         self.assertIn("dashboard", managed)
 
-    @patch.dict(os.environ, {"PRODUCT": "existing"}, clear=False)
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
     def test_existing_product_does_not_require_dashboard_gateway(self) -> None:
         self.assertFalse(_install_requires_dashboard_gateway())
 

@@ -26,7 +26,7 @@ def test_resolve_fbcf_image_probes_cluster_for_existing() -> None:
         out = pfi.resolve_fbcf_image(
             taskruns,
             extract_task_result="n/a",
-            product="existing",
+            product="",
             tests_shared_kubeconfig="/tmp/kubeconfig",
             operator_namespace="redhat-ods-operator",
             operator_name="rhods-operator",
@@ -40,7 +40,7 @@ def test_resolve_fbcf_image_existing_falls_back_to_na() -> None:
             pfi.resolve_fbcf_image(
                 [],
                 extract_task_result="n/a",
-                product="existing",
+                product="",
             )
             == "n/a"
         )

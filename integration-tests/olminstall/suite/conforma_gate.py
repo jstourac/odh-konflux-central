@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
+from suite.constants import is_test_only_product
+
 LABEL_SNAPSHOT = "appstudio.openshift.io/snapshot"
 LABEL_EC_KIND = "test.appstudio.openshift.io/kind"
 EC_KIND_VALUE = "enterprise-contract"
@@ -146,7 +148,8 @@ def should_wait_for_conforma(
 ) -> bool:
     if (wait_for_conforma or "true").strip().lower() not in ("1", "true", "yes"):
         return False
-    if (product or "").strip().lower() == "existing":
+
+    if is_test_only_product(product):
         return False
     return bool((snapshot_name or "").strip())
 
@@ -159,7 +162,7 @@ def decide_conforma_gate_without_wait(
 ) -> ConformaGateDecision:
     is_explicit_bypass = (
         (wait_for_conforma or "true").strip().lower() not in ("1", "true", "yes")
-        or (product or "").strip().lower() == "existing"
+        or is_test_only_product(product)
     )
     if is_explicit_bypass:
         return ConformaGateDecision(

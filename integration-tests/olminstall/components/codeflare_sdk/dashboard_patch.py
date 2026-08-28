@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from components.codeflare_sdk.eaas import prepend_codeflare_eaas_kubeconfig_auth
+from components.codeflare_sdk.ephc import prepend_codeflare_ephc_kubeconfig_auth
 
 _RUN_TESTS = "run-tests.sh"
 _OLD_PREFIX = "ODH_DASHBOARD_URL=$(oc get consolelink rhodslink"
@@ -106,7 +106,7 @@ def prepend_codeflare_run_command_patches(
     dashboard_url: str = "",
     artifacts_dir: Path | None = None,
 ) -> str:
-    cmd = prepend_codeflare_eaas_kubeconfig_auth(run_command)
+    cmd = prepend_codeflare_ephc_kubeconfig_auth(run_command)
     return prepend_codeflare_dashboard_patch(
         cmd,
         dashboard_url=dashboard_url,

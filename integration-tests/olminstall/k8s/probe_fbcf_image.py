@@ -135,6 +135,8 @@ def resolve_fbcf_image(
 
     if image:
         return image
-    if (product or "").strip().lower() == "existing":
+    from suite.constants import is_test_only_product
+
+    if is_test_only_product(product):
         return from_task if from_task and from_task != "(unknown)" else "n/a"
     return from_task if from_task and from_task != "n/a" else "(unknown)"

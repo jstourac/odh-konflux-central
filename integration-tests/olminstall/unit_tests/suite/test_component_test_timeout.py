@@ -85,15 +85,22 @@ class ComponentTestTimeoutTest(unittest.TestCase):
 
 
 class EaasComponentTimeoutCapTest(unittest.TestCase):
-    def test_eaas_caps_platform_smoke(self) -> None:
-        with unittest.mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}):
+    def test_ephc_caps_platform_smoke(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}):
             self.assertEqual(
-                apply_cluster_source_timeout_cap(component_id="platform", timeout_raw="35m"),
-                "30m",
+                apply_cluster_source_timeout_cap(component_id="platform", timeout_raw="45m"),
+                "45m",
             )
 
-    def test_eaas_keeps_shorter_catalog_timeout(self) -> None:
-        with unittest.mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}):
+    def test_ephc_caps_platform_below_catalog(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}):
+            self.assertEqual(
+                apply_cluster_source_timeout_cap(component_id="platform", timeout_raw="60m"),
+                "45m",
+            )
+
+    def test_ephc_keeps_shorter_catalog_timeout(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}):
             self.assertEqual(
                 apply_cluster_source_timeout_cap(component_id="mlflow", timeout_raw="5m"),
                 "5m",
@@ -102,8 +109,8 @@ class EaasComponentTimeoutCapTest(unittest.TestCase):
     def test_external_cluster_unchanged(self) -> None:
         with unittest.mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "olminstall-kubeconfig-rh-nightly-pm"}):
             self.assertEqual(
-                apply_cluster_source_timeout_cap(component_id="platform", timeout_raw="35m"),
-                "35m",
+                apply_cluster_source_timeout_cap(component_id="platform", timeout_raw="45m"),
+                "45m",
             )
 
 
@@ -111,7 +118,7 @@ class PipelineTaskTimeoutTest(unittest.TestCase):
     def test_platform_smoke_maps_to_tekton_timeout(self) -> None:
         from suite.component_test_timeout import pipeline_task_timeout_from_smoke
 
-        self.assertEqual(pipeline_task_timeout_from_smoke("35m"), "57m0s")
+        self.assertEqual(pipeline_task_timeout_from_smoke("45m"), "69m0s")
 
     def test_short_smoke_has_floor(self) -> None:
         from suite.component_test_timeout import pipeline_task_timeout_from_smoke

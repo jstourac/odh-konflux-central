@@ -25,38 +25,71 @@ class TestPipelinerunNaming(unittest.TestCase):
         self.assertEqual(compact_version_for_name("n/a"), "")
 
     def test_gates_segment(self) -> None:
-        self.assertEqual(gates_segment_for_name("bvt,smoke"), "bvt-smoke")
-        self.assertEqual(gates_segment_for_name("bvt,smoke,tier1"), "bvt-smoke-tier1")
+        self.assertEqual(gates_segment_for_name("bvt,smoke"), "smoke")
+        self.assertEqual(gates_segment_for_name("bvt"), "bvt")
+        self.assertEqual(gates_segment_for_name("smoke"), "smoke")
+        self.assertEqual(gates_segment_for_name("bvt,smoke,tier1"), "smoke-tier1")
 
-    def test_full_rhoai_eaas(self) -> None:
+    def test_single_component_after_gates(self) -> None:
+        prefix = build_olminstall_generate_prefix(
+            product="rhoai",
+            cluster_source="EPHC",
+            target_type="ephc",
+            tests_csv="bvt,smoke",
+            components_csv="maas_billing",
+            run_owner="nmanos",
+        )
+        self.assertEqual(prefix, "e2e-cli-nmanos-ephc-rhoai-smoke-maas-billing-")
+
+    def test_multiple_or_all_components_omitted(self) -> None:
+        multi = build_olminstall_generate_prefix(
+            product="rhoai",
+            cluster_source="EPHC",
+            target_type="ephc",
+            tests_csv="bvt,smoke",
+            components_csv="maas_billing,platform",
+            run_owner="nmanos",
+        )
+        self.assertEqual(multi, "e2e-cli-nmanos-ephc-rhoai-smoke-")
+        all_ids = build_olminstall_generate_prefix(
+            product="rhoai",
+            cluster_source="EPHC",
+            target_type="ephc",
+            tests_csv="bvt,smoke",
+            components_csv="all",
+            run_owner="nmanos",
+        )
+        self.assertEqual(all_ids, "e2e-cli-nmanos-ephc-rhoai-smoke-")
+
+    def test_full_rhoai_ephc(self) -> None:
         prefix = build_olminstall_generate_prefix(
             product="rhoai",
             version="rhoai-v3-5-ea-2",
-            cluster_source="EAAS",
-            target_type="eaas",
+            cluster_source="EPHC",
+            target_type="ephc",
             tests_csv="bvt,smoke",
             run_owner="nmanos@redhat.com",
         )
-        self.assertEqual(prefix, "e2e-cli-nmanos-rhoai-3.5ea2-eaas-bvt-smoke-")
+        self.assertEqual(prefix, "e2e-cli-nmanos-ephc-rhoai-3.5ea2-smoke-")
 
     def test_existing_omits_product(self) -> None:
         prefix = build_olminstall_generate_prefix(
-            product="existing",
+            product="",
             tests_csv="bvt,smoke",
             run_owner="nmanos",
         )
-        self.assertEqual(prefix, "e2e-cli-nmanos-bvt-smoke-")
+        self.assertEqual(prefix, "e2e-cli-nmanos-smoke-")
 
     def test_odh_without_version(self) -> None:
         prefix = build_olminstall_generate_prefix(
             product="odh",
             version="n/a",
-            cluster_source="EAAS",
-            target_type="eaas",
+            cluster_source="EPHC",
+            target_type="ephc",
             tests_csv="bvt,smoke",
             run_owner="jdoe",
         )
-        self.assertEqual(prefix, "e2e-cli-jdoe-odh-eaas-bvt-smoke-")
+        self.assertEqual(prefix, "e2e-cli-jdoe-ephc-odh-smoke-")
 
     def test_external_cluster_label(self) -> None:
         prefix = build_olminstall_generate_prefix(
@@ -68,11 +101,11 @@ class TestPipelinerunNaming(unittest.TestCase):
             tests_csv="bvt",
             run_owner="alice",
         )
-        self.assertEqual(prefix, "e2e-cli-alice-rhoai-3.5-ods-qe-psi-09-bvt-")
+        self.assertEqual(prefix, "e2e-cli-alice-ods-qe-psi-09-rhoai-3.5-bvt-")
 
     def test_existing_external_cluster_label(self) -> None:
         prefix = build_olminstall_generate_prefix(
-            product="existing",
+            product="",
             cluster_source="olminstall-kubeconfig-nmanos",
             cluster_label="nmanos-konflux1",
             target_type="external",
@@ -120,7 +153,7 @@ class TestPipelinerunNaming(unittest.TestCase):
         )
         self.assertEqual(
             prefix,
-            "e2e-cli-nmanos-rhoai-3.5-nmanos-konflux-bvt-smoke-",
+            "e2e-cli-nmanos-nmanos-konflux-rhoai-3.5-smoke-",
         )
 
     def test_overflow_drops_version_before_cluster(self) -> None:
@@ -129,13 +162,13 @@ class TestPipelinerunNaming(unittest.TestCase):
             version="rhoai-v3-5-ea-2",
             cluster_label="rh-nightly-pm-staging-01",
             target_type="external",
-            tests_csv="bvt,smoke,tier1",
+            tests_csv="bvt,smoke,tier1,tier2,tier3",
             run_owner="nmanos",
         )
         self.assertIn("rh-nightly-pm-stagin", prefix)
-        self.assertIn("rhoai", prefix)
         self.assertNotIn("3.5ea2", prefix)
-        self.assertNotEqual(prefix, "e2e-cli-nmanos-bvt-smoke-tier1-")
+        self.assertTrue(prefix.startswith("e2e-cli-nmanos-rh-nightly-pm-stagin-"))
+        self.assertNotEqual(prefix, "e2e-cli-nmanos-smoke-tier1-tier2-tier3-")
 
     def test_is_olminstall_pipelinerun_name(self) -> None:
         self.assertTrue(is_olminstall_pipelinerun_name("e2e-cli-nmanos-bvt-smoke-abc"))
@@ -149,7 +182,7 @@ class TestPipelinerunNaming(unittest.TestCase):
             installed_product="rhoai",
             operator_version="2.4.1",
             cluster_label="ods-qe-psi-07",
-            pipeline_product="existing",
+            pipeline_product="",
         )
         self.assertEqual(name, "rhoai-2.4.1-ods-qe-psi-07-diagnostic-2026-06-24T112510Z.log")
 
@@ -159,9 +192,21 @@ class TestPipelinerunNaming(unittest.TestCase):
             installed_product="rhoai",
             operator_version="rhoai-v3-5-ea-2",
             cluster_label="ods-qe-psi-07",
-            pipeline_product="existing",
+            pipeline_product="",
         )
         self.assertEqual(name, "rhoai-3.5ea2-ods-qe-psi-07-diagnostic-2026-06-24T112510Z.log")
+
+    def test_diagnostic_artifact_log_name_uses_pipeline_product_when_installed_unknown(
+        self,
+    ) -> None:
+        name = build_diagnostic_artifact_log_name(
+            since_time="2026-06-24T11:25:10Z",
+            installed_product="unknown",
+            operator_version="",
+            cluster_label="",
+            pipeline_product="rhoai",
+        )
+        self.assertEqual(name, "rhoai-diagnostic-2026-06-24T112510Z.log")
 
     def test_diagnostic_version_segment_semver(self) -> None:
         self.assertEqual(diagnostic_version_segment("2.4.1"), "2.4.1")

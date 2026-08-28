@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import sys
+import time
+
 from install.dsc_install import oc_run
 
 from components.maas_billing.common import (
@@ -14,6 +18,8 @@ from components.maas_billing.common import (
     _MAAS_AUTH_POLICY_PATH,
     _MANAGED_ANNOTATION,
     _secret_exists,
+    maas_api_auth_validate_url,
+    maas_api_namespace,
 )
 from components.maas_billing.database import _clone_models_as_a_service
 
@@ -141,6 +147,58 @@ spec:
         )
         return
     print(f"✓ GatewayClass {_OPENSHIFT_DEFAULT_GATEWAY_CLASS} applied", flush=True)
+
+
+def openshift_default_gateway_class_accepted() -> bool:
+    r = oc_run(
+        [
+            "get",
+            "gatewayclass",
+            _OPENSHIFT_DEFAULT_GATEWAY_CLASS,
+            "-o",
+            "jsonpath={.status.conditions[?(@.type==\"Accepted\")].status}",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    return r.returncode == 0 and (r.stdout or "").strip() == "True"
+
+
+def wait_openshift_default_gateway_class_accepted(
+    *,
+    timeout_sec: int | None = None,
+) -> bool:
+    """Apply openshift-default GatewayClass if needed and poll until Accepted=True."""
+    ensure_openshift_default_gateway_class()
+    if openshift_default_gateway_class_accepted():
+        return True
+    raw = os.environ.get("GATEWAY_CLASS_ACCEPT_TIMEOUT_SEC", "").strip()
+    if timeout_sec is None:
+        try:
+            timeout_sec = int(raw) if raw else 300
+        except ValueError:
+            timeout_sec = 300
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if openshift_default_gateway_class_accepted():
+            print(
+                f"✓ GatewayClass {_OPENSHIFT_DEFAULT_GATEWAY_CLASS} Accepted=True",
+                flush=True,
+            )
+            return True
+        if int(time.time()) % 30 < 12:
+            print(
+                f"Waiting for GatewayClass {_OPENSHIFT_DEFAULT_GATEWAY_CLASS} Accepted=True...",
+                flush=True,
+            )
+        time.sleep(10)
+    print(
+        f"WARN: GatewayClass {_OPENSHIFT_DEFAULT_GATEWAY_CLASS} not Accepted within {timeout_sec}s",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False
 
 
 def ensure_maas_gateway_ingress_tls_secret() -> None:
@@ -289,17 +347,7 @@ def ensure_maas_gateway_route() -> None:
     print(f"✓ MaaS gateway route {_GATEWAY_NS}/{_GATEWAY_NAME} → {hostname}", flush=True)
 
 
-def ensure_maas_api_auth_policy() -> None:
-    """Apply maas-api Kuadrant AuthPolicy when missing or apiKeyValidation URL is wrong."""
-    validate_url = (
-        f"https://maas-api.{_MAAS_APPS_NS}.svc.cluster.local:8443/internal/v1/api-keys/validate"
-    )
-    oc_run(
-        ["delete", "authpolicy", _MAAS_AUTH_POLICY, "-n", "default", "--ignore-not-found"],
-        check=False,
-        capture_output=True,
-        timeout=30,
-    )
+def _maas_api_auth_policy_callback_url() -> str:
     r = oc_run(
         [
             "get",
@@ -314,17 +362,45 @@ def ensure_maas_api_auth_policy() -> None:
         capture_output=True,
         timeout=30,
     )
-    if r.returncode == 0 and (r.stdout or "").strip() == validate_url:
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def ensure_maas_api_auth_policy() -> None:
+    """Apply maas-api Kuadrant AuthPolicy when missing or apiKeyValidation URL is wrong."""
+    validate_url = maas_api_auth_validate_url()
+    oc_run(
+        ["delete", "authpolicy", _MAAS_AUTH_POLICY, "-n", "default", "--ignore-not-found"],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    current_url = _maas_api_auth_policy_callback_url()
+    if current_url == validate_url:
         print(
             f"✓ MaaS API AuthPolicy {_MAAS_APPS_NS}/{_MAAS_AUTH_POLICY} has apiKeyValidation callback",
             flush=True,
         )
         return
-    if r.returncode == 0:
+    if current_url:
         print(
-            f"Patching {_MAAS_APPS_NS}/{_MAAS_AUTH_POLICY} apiKeyValidation callback URL...",
+            f"Replacing {_MAAS_APPS_NS}/{_MAAS_AUTH_POLICY} "
+            f"(stale callback {current_url!r} → {validate_url!r})...",
             flush=True,
         )
+        deleted = oc_run(
+            ["delete", "authpolicy", _MAAS_AUTH_POLICY, "-n", _MAAS_APPS_NS],
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+        if deleted.returncode != 0:
+            err = (deleted.stderr or deleted.stdout or "").strip()
+            raise RuntimeError(
+                f"Could not delete stale MaaS API AuthPolicy: {err or 'unknown error'}"
+            )
+        time.sleep(2)
 
     repo = _clone_models_as_a_service()
     policy_path = repo / _MAAS_AUTH_POLICY_PATH
@@ -346,21 +422,27 @@ def ensure_maas_api_auth_policy() -> None:
     if apply.returncode != 0:
         err = (apply.stderr or apply.stdout or "").strip()
         raise RuntimeError(f"Could not apply MaaS API AuthPolicy: {err or 'unknown error'}")
+    applied_url = _maas_api_auth_policy_callback_url()
+    if applied_url != validate_url:
+        raise RuntimeError(
+            f"MaaS API AuthPolicy callback still {applied_url!r} after apply "
+            f"(expected {validate_url!r})"
+        )
     print(f"✓ MaaS API AuthPolicy {_MAAS_APPS_NS}/{_MAAS_AUTH_POLICY} applied", flush=True)
 
 
 def ensure_maas_gateway_https_service_clusterip() -> bool:
-    """On EaaS/HyperShift, create gateway-owned HTTPS ClusterIP when controller never Programs.
+    """On EPHC/HyperShift, create gateway-owned HTTPS ClusterIP when controller never Programs.
 
     OpenShift Gateway controller may leave Programmed=Unknown without creating the
     ``maas-default-gateway-openshift-default`` Service (LB provisioning gap). maas-api
     only needs a resolvable HTTPS ClusterIP + Route passthrough.
     """
     from components.maas_billing.common import _maas_gateway_https_service_ready
-    from install.gateway_config import cluster_source_is_eaas
+    from install.gateway_config import cluster_source_is_ephc
     from install.rosa_hcp_pull_setup import is_hypershift_managed_cluster
 
-    if not (cluster_source_is_eaas() or is_hypershift_managed_cluster()):
+    if not (cluster_source_is_ephc() or is_hypershift_managed_cluster()):
         return False
     ready, detail = _maas_gateway_https_service_ready()
     if ready:
@@ -414,7 +496,7 @@ spec:
       protocol: TCP
 """
     print(
-        f"Applying EaaS fallback HTTPS ClusterIP {_GATEWAY_NS}/{_GATEWAY_SVC}...",
+        f"Applying EPHC fallback HTTPS ClusterIP {_GATEWAY_NS}/{_GATEWAY_SVC}...",
         flush=True,
     )
     apply = oc_run(
@@ -427,16 +509,16 @@ spec:
     if apply.returncode != 0:
         err = (apply.stderr or apply.stdout or "").strip()
         print(
-            f"WARN: could not apply EaaS HTTPS ClusterIP: {err[:200]}",
+            f"WARN: could not apply EPHC HTTPS ClusterIP: {err[:200]}",
             flush=True,
         )
         return False
     ready, detail = _maas_gateway_https_service_ready()
     if ready:
-        print(f"✓ EaaS HTTPS ClusterIP ready ({detail})", flush=True)
+        print(f"✓ EPHC HTTPS ClusterIP ready ({detail})", flush=True)
         return True
     print(
-        f"WARN: EaaS HTTPS ClusterIP applied but still not ready ({detail[:120]})",
+        f"WARN: EPHC HTTPS ClusterIP applied but still not ready ({detail[:120]})",
         flush=True,
     )
     return False

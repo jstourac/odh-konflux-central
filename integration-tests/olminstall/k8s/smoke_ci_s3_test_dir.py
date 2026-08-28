@@ -100,7 +100,7 @@ def _object_exists(client, *, bucket: str, key: str) -> bool:
         return True
     except ClientError as exc:
         code = str(exc.response.get("Error", {}).get("Code", ""))
-        if code in ("404", "NoSuchKey", "NotFound"):
+        if code in ("404", "NoSuchKey", "NotFound", "403", "Forbidden", "AccessDenied"):
             return False
         raise
 
@@ -145,11 +145,11 @@ def log_model_runtime_ci_s3_layout() -> None:
     _log_ci_s3_layout(component="model_runtime", markers=_MODEL_RUNTIME_MARKERS)
 
 
-def _skip_vllm_on_eaas_or_hypershift() -> list[str]:
-    """EaaS/HyperShift workers cannot schedule vLLM CPU (8 CPU / 10Gi); suites hang until timeout."""
-    from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
+def _skip_vllm_on_ephc_or_hypershift() -> list[str]:
+    """EPHC/HyperShift workers cannot schedule vLLM CPU (8 CPU / 10Gi); suites hang until timeout."""
+    from suite.its_trigger_params import CLUSTER_SOURCE_EPHC
 
-    if os.environ.get("CLUSTER_SOURCE", "").strip() == CLUSTER_SOURCE_EAAS:
+    if os.environ.get("CLUSTER_SOURCE", "").strip() == CLUSTER_SOURCE_EPHC:
         return list(_VLLM_CPU_SMOKE_TESTS)
     try:
         from install.rosa_hcp_pull_setup import is_hypershift_managed_cluster
@@ -167,10 +167,10 @@ def _skip_vllm_on_eaas_or_hypershift() -> list[str]:
 
 def model_runtime_pytest_extra_args(*, skip_s3_probe: bool = False) -> str:
     """Skip model_runtime smoke tests when required S3 objects are missing."""
-    skips: list[str] = _skip_vllm_on_eaas_or_hypershift()
+    skips: list[str] = _skip_vllm_on_ephc_or_hypershift()
     if skips:
         print(
-            "✓ EaaS/HyperShift — skipping vLLM CPU smoke "
+            "✓ EPHC/HyperShift — skipping vLLM CPU smoke "
             f"({', '.join(skips)}; unschedulable resource requests)",
             flush=True,
         )

@@ -216,7 +216,7 @@ def test_diagnostic_artifact_log_name(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (
         _diagnostic_artifact_log_name(
             since_time="2026-06-24T11:25:10Z",
-            pipeline_product="existing",
+            pipeline_product="",
             operator_name="rhods-operator",
             operator_version="2.4.1",
             kubeconfig="/tmp/kubeconfig",
@@ -248,7 +248,7 @@ def test_stage_triage_for_artifacts_writes_single_log(tmp_path, monkeypatch: pyt
     staged = _stage_triage_for_artifacts(
         diag,
         since_time="2026-06-22T10:00:00Z",
-        pipeline_product="existing",
+        pipeline_product="",
         operator_name="rhods-operator",
         operator_version="2.4.1",
         kubeconfig=str(tmp_path / "kubeconfig"),

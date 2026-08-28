@@ -27,16 +27,16 @@ _BLOCK_PYYAML = textwrap.dedent(
         return real_import(name, globals, locals, fromlist, level)
     builtins.__import__ = blocked_import
     """
-)
+).strip()
 
 _FORBIDDEN_AT_IMPORT = ("components.maas_billing.uwm",)
 
-def _run_probe(*parts: str) -> subprocess.CompletedProcess[str]:
-    script = "".join(textwrap.dedent(part) for part in parts)
+
+def _run_probe(script: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(OLMINSTALL_ROOT)
     return subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", textwrap.dedent(script).strip()],
         cwd=OLMINSTALL_ROOT,
         env=env,
         capture_output=True,
@@ -44,56 +44,53 @@ def _run_probe(*parts: str) -> subprocess.CompletedProcess[str]:
         check=False,
     )
 
-def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    if "module" not in metafunc.fixturenames:
-        return
-    modules = discover_tekton_python_entrypoints()
+
+@pytest.mark.timeout(60)
+def test_all_tekton_entrypoints_import() -> None:
+    """One subprocess for all entrypoints (faster than per-module parametrization)."""
+    modules = sorted(discover_tekton_python_entrypoints())
     assert modules, "expected at least one Tekton python -m entrypoint"
-    if "lean_image" in metafunc.fixturenames:
-        cases = [(name, lean) for name, lean in sorted(modules.items()) if lean]
-        metafunc.parametrize(
-            "module,lean_image",
-            cases,
-            ids=[name for name, _ in cases],
+    imports = "\n".join(f"importlib.import_module({name!r})" for name in modules)
+    proc = _run_probe(f"import importlib\n{imports}")
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+
+
+@pytest.mark.timeout(60)
+def test_lean_image_entrypoints_import_without_pyyaml() -> None:
+    modules = sorted(
+        name for name, lean in discover_tekton_python_entrypoints().items() if lean
+    )
+    assert modules, "expected at least one lean-image Tekton entrypoint"
+    imports = "\n".join(f"importlib.import_module({name!r})" for name in modules)
+    proc = _run_probe(
+        "\n".join(
+            [
+                _BLOCK_PYYAML,
+                "import importlib",
+                "import sys",
+                imports,
+                f"for forbidden in {list(_FORBIDDEN_AT_IMPORT)!r}:",
+                "    assert forbidden not in sys.modules, forbidden",
+            ]
         )
-        return
-    metafunc.parametrize("module", sorted(modules), ids=sorted(modules))
-
-def test_tekton_entrypoint_import(module: str) -> None:
-    proc = _run_probe(
-        f"""
-        import importlib
-        importlib.import_module({module!r})
-        """
     )
-    assert proc.returncode == 0, f"{module}: {proc.stderr or proc.stdout}"
+    assert proc.returncode == 0, proc.stderr or proc.stdout
 
-def test_lean_image_entrypoint_import_without_pyyaml(module: str, lean_image: bool) -> None:
-    assert lean_image
-    proc = _run_probe(
-        _BLOCK_PYYAML,
-        f"""
-        import importlib
-        import sys
-        importlib.import_module({module!r})
-        for forbidden in {list(_FORBIDDEN_AT_IMPORT)!r}:
-            assert forbidden not in sys.modules, forbidden
-        """,
-    )
-    assert proc.returncode == 0, f"{module}: {proc.stderr or proc.stdout}"
 
 def test_eager_maas_prep_import_requires_pyyaml() -> None:
     """Document why lazy-import in component_prereqs matters for lean-image entrypoints."""
     proc = _run_probe(
-        _BLOCK_PYYAML,
-        """
-        import importlib
-        try:
-            importlib.import_module('components.maas_billing.prep')
-        except ImportError as exc:
-            assert 'PyYAML' in str(exc)
-        else:
-            raise SystemExit('expected ImportError for eager maas prep without PyYAML')
-        """,
+        "\n".join(
+            [
+                _BLOCK_PYYAML,
+                "import importlib",
+                "try:",
+                "    importlib.import_module('components.maas_billing.prep')",
+                "except ImportError as exc:",
+                "    assert 'PyYAML' in str(exc)",
+                "else:",
+                "    raise SystemExit('expected ImportError for eager maas prep without PyYAML')",
+            ]
+        )
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout

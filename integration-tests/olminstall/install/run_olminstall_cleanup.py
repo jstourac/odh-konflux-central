@@ -27,12 +27,13 @@ def _require_tool(name: str) -> None:
 
 
 def run_cleanup_operator(*, olminstall_dir: Path, kubeconfig: str | Path) -> None:
-    """Run MaaS Postgres cleanup, ``cleanup.sh -t operator``, then tenant namespace cleanup."""
+    """Run MaaS Postgres cleanup, leaked tenant NS cleanup, ``cleanup.sh -t operator``, then tenant NS cleanup."""
     from components.maas_billing.database import (
         cleanup_maas_postgres_infra,
         cleanup_maas_tenant_namespace,
     )
     from components.maas_billing.bbr_pre_processing import cleanup_stale_maas_ingress_workloads
+    from install.leaked_tenant_namespace_cleanup import cleanup_leaked_tenant_namespaces
 
     maas_exc: BaseException | None = None
     cleanup_exc: AppError | None = None
@@ -50,6 +51,14 @@ def run_cleanup_operator(*, olminstall_dir: Path, kubeconfig: str | Path) -> Non
         maas_exc = exc
         print(
             f"WARN: MaaS Postgres infra cleanup failed ({exc}); continuing with operator cleanup",
+            file=sys.stderr,
+            flush=True,
+        )
+    try:
+        cleanup_leaked_tenant_namespaces()
+    except Exception as exc:
+        print(
+            f"WARN: leaked tenant namespace cleanup failed ({exc}); continuing with operator cleanup",
             file=sys.stderr,
             flush=True,
         )

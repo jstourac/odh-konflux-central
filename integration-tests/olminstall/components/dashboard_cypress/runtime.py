@@ -6,23 +6,22 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
+import install.ldap as _ldap
 from components.dashboard_cypress.config import (
-    _find_all_junit_reports,
-    _find_mochawesome_json_paths,
-    _junit_report_has_testcases,
-    _mochawesome_json_to_junit_xml,
-    discover_cypress_results_subdirs,
-    merge_smokeset_junit_reports,
-    write_merged_junit_reports,
-)
+  _find_all_junit_reports, _find_mochawesome_json_paths,
+  _junit_report_has_testcases, _mochawesome_json_to_junit_xml,
+  discover_cypress_results_subdirs, merge_smokeset_junit_reports,
+  write_merged_junit_reports)
 from helpers.log_redact import redact_command_for_log
 from install.dsc_install import oc_run
-import install.ldap as _ldap
 
 _DASHBOARD_AUTH_NS = "redhat-ods-applications"
 _RUNTIME_CONFIG_PATCH_KEYS = (
@@ -74,10 +73,10 @@ _BYOIDC_EXTRA_SKIP_TAGS = (
     "@LLMDServingCI @HardwareProfilesCI @HardwareProfileModelServing"
 )
 _KONFLUX_MANIFEST_EXTRA_SKIP_TAGS = "@ODS-327 @ODS-492"
-# Konflux EaaS HCP: historically skipped training/hardware paths under bearer auth.
-# JP-cypress-EaaS-parity: keep empty so SmokeSets match regular-cluster coverage;
+# Konflux EPHC HCP: historically skipped training/hardware paths under bearer auth.
+# JP-cypress-EPHC-parity: keep empty so SmokeSets match regular-cluster coverage;
 # auth failures surface as real fails until LDAP/OAuth IdP is available.
-_EAAS_BEARER_EXTRA_SKIP_TAGS = ""
+_EHC_BEARER_EXTRA_SKIP_TAGS = ""
 
 
 def stage_writable_kubeconfig(artifacts_dir: Path, kubeconfig_src: str) -> Path:
@@ -217,221 +216,25 @@ def prepare_dashboard_worktree(
 
 
 def patch_dashboard_cypress_upstream_tests(dashboard_src: Path) -> None:
-    """Patch upstream Cypress hooks that break on Konflux external clusters."""
-    about = (
-        dashboard_src
-        / "packages/cypress/cypress/tests/e2e/applications/testAboutDialog.cy.ts"
-    )
-    if not about.is_file():
-        return
-    text = about.read_text(encoding="utf-8")
-    if "olminstall-patched-about-dialog" in text:
-        return
-    text = text.replace("retryableBefore(async () => {", "retryableBefore(() => {")
-    text = text.replace(
-        "getInstalledProductName('default').then",
-        (
-            "return getInstalledProductName(Cypress.env('OPERATOR_NAMESPACE') || "
-            "'redhat-ods-operator').then"
-        ),
-    )
-    text = text.replace(
-        "getCsvByDisplayName(productName, 'default').then",
-        (
-            "return getCsvByDisplayName(productName, Cypress.env('OPERATOR_NAMESPACE') || "
-            "'redhat-ods-operator').then"
-        ),
-    )
-    about.write_text(
-        "// olminstall-patched-about-dialog\n" + text,
-        encoding="utf-8",
-    )
-    print(f"✓ Patched {about.name} for operator-namespace CSV lookup", flush=True)
-
-
-def _cypress_kube_bearer_bypass_active() -> str:
-    """Expression used in upstream Cypress patches when OC bearer replaces OAuth login."""
-    return (
-        "Boolean(Cypress.env('OC_TOKEN')) && "
-        "!String(Cypress.env('CLUSTER_AUTH') || '').trim()"
-    )
+    """Do not patch Cypress test code. Environment prep handles auth and namespace."""
+    # Cypress tests run as-is; environment setup (OPERATOR_NAMESPACE, OC_TOKEN,
+    # CLUSTER_AUTH, TEST_USER_*) and cluster prep (gateway, auth) ensure tests pass.
+    pass
 
 
 def patch_dashboard_cypress_bearer_auth(dashboard_src: Path) -> None:
-    """Skip htpasswd/LDAP identity checks when Konflux EaaS uses kube bearer gateway auth."""
-    marker = "olminstall-patched-bearer-auth"
-    bearer_expr = _cypress_kube_bearer_bypass_active()
-
-    application = dashboard_src / "packages/cypress/cypress/tests/e2e/application.cy.ts"
-    if application.is_file():
-        text = application.read_text(encoding="utf-8")
-        if marker not in text:
-            old = """    cy.visitWithLogin('/');
-    cy.findByRole('banner', { name: 'page masthead' }).contains(
-      HTPASSWD_CLUSTER_ADMIN_USER.USERNAME,
-    );"""
-            new = f"""    cy.visitWithLogin('/');
-    if (!({bearer_expr})) {{
-      cy.findByRole('banner', {{ name: 'page masthead' }}).contains(
-        HTPASSWD_CLUSTER_ADMIN_USER.USERNAME,
-      );
-    }}"""
-            if old in text:
-                application.write_text(
-                    f"// {marker}\n" + text.replace(old, new, 1),
-                    encoding="utf-8",
-                )
-                print(f"✓ Patched {application.name} for kube bearer masthead check", flush=True)
-            else:
-                print(
-                    f"WARN: skip bearer auth patch; {application.name} layout changed",
-                    flush=True,
-                )
-
-    catalog = (
-        dashboard_src
-        / "packages/cypress/cypress/tests/e2e/modelCatalog/testCatalogSettingsAvailable.cy.ts"
-    )
-    if catalog.is_file():
-        text = catalog.read_text(encoding="utf-8")
-        if marker not in text:
-            old = """      cy.step('Log into the application as non-admin user');
-      cy.visitWithLogin('/', LDAP_CONTRIBUTOR_USER);"""
-            new = f"""      if ({bearer_expr}) {{
-        cy.log('Skipping: EaaS bearer auth cannot impersonate LDAP contributor user');
-        return;
-      }}
-      cy.step('Log into the application as non-admin user');
-      cy.visitWithLogin('/', LDAP_CONTRIBUTOR_USER);"""
-            if old in text:
-                catalog.write_text(
-                    f"// {marker}\n" + text.replace(old, new, 1),
-                    encoding="utf-8",
-                )
-                print(
-                    f"✓ Patched {catalog.name} for kube bearer non-admin RBAC skip",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"WARN: skip bearer catalog patch; {catalog.name} layout changed",
-                    flush=True,
-                )
+    """Do not patch Cypress test code. OC_TOKEN and CLUSTER_AUTH env vars ensure proper auth flow."""
+    pass
 
 
 def patch_dashboard_cypress_automl_hooks(dashboard_src: Path) -> None:
-    """Guard AutoML after() when before() did not finish (skipped SmokeSet4 / missing S3)."""
-    automl = (
-        dashboard_src
-        / "packages/cypress/cypress/tests/e2e/automl/testAutomlBinaryClassification.cy.ts"
-    )
-    if not automl.is_file():
-        return
-    text = automl.read_text(encoding="utf-8")
-    marker = "olminstall-patched-automl-after-guard"
-    if marker in text:
-        return
-    old = """  after(() => {
-    if (!automlWasEnabled) {
-      setAutomlEnabled(false);
-    }
-    deleteS3TestFiles(projectName, testData.awsBucket, `*${uuid}*`);
-"""
-    new = """  after(() => {
-    if (!automlWasEnabled) {
-      setAutomlEnabled(false);
-    }
-    if (!testData?.awsBucket || !projectName) {
-      return;
-    }
-    deleteS3TestFiles(projectName, testData.awsBucket, `*${uuid}*`);
-"""
-    if old not in text:
-        print(
-            f"WARN: skip AutoML after() patch; {automl.name} layout changed",
-            flush=True,
-        )
-        return
-    automl.write_text(
-        f"// {marker}\n" + text.replace(old, new, 1),
-        encoding="utf-8",
-    )
-    print(f"✓ Patched {automl.name} AutoML after() guard", flush=True)
+    """Do not patch Cypress test code. Handle S3 prereqs via cluster setup instead."""
+    pass
 
 
 def patch_dashboard_cypress_ldap_gateway_login(dashboard_src: Path) -> None:
-    """Pooled PSI LDAP: use OAuth IdP login, not Keycloak, when AUTH_TYPE is ldap-*."""
-    app_ts = (
-        dashboard_src
-        / "packages/cypress/cypress/support/commands/application.ts"
-    )
-    if not app_ts.is_file():
-        return
-    text = app_ts.read_text(encoding="utf-8")
-    marker = "olminstall-patched-ldap-gateway-login-v2"
-    if marker in text:
-        return
-    if "TEST_USER_AUTH_TYPE" in text and "ldapAuthType.startsWith('ldap')" in text:
-        app_ts.write_text(f"// {marker}\n" + text.lstrip(), encoding="utf-8")
-        return
-    old_403 = """        if (isBYOIDCCluster) {
-          // For BYOIDC clusters, we expect to be redirected to Keycloak
-          handleKeycloakLogin(credentials);
-        } else {"""
-    new_403 = """        const ldapAuthType = String(credentials.AUTH_TYPE || '').toLowerCase();
-        if (isBYOIDCCluster && !ldapAuthType.startsWith('ldap')) {
-          // For BYOIDC clusters, we expect to be redirected to Keycloak
-          handleKeycloakLogin(credentials);
-        } else {"""
-    old_url = """      if (currentUrl.includes('keycloak') || currentUrl.includes('/protocol/openid-connect/auth')) {
-        handleKeycloakLogin(credentials);
-      }"""
-    new_url = """      const ldapAuthType = String(credentials.AUTH_TYPE || '').toLowerCase();
-      if (
-        (currentUrl.includes('keycloak') || currentUrl.includes('/protocol/openid-connect/auth'))
-        && !ldapAuthType.startsWith('ldap')
-      ) {
-        handleKeycloakLogin(credentials);
-      }"""
-    if old_403 not in text or old_url not in text:
-        print(
-            f"WARN: skip LDAP gateway login patch; {app_ts.name} layout changed",
-            flush=True,
-        )
-        return
-    old_visit = """Cypress.Commands.add('visitWithLogin', (relativeUrl, credentials = HTPASSWD_CLUSTER_ADMIN_USER) => {
-  if (Cypress.env('MOCK')) {"""
-    new_visit = """Cypress.Commands.add('visitWithLogin', (relativeUrl, credentials = HTPASSWD_CLUSTER_ADMIN_USER) => {
-  const envLdapAuth = String(Cypress.env('TEST_USER_AUTH_TYPE') || '').toLowerCase();
-  if (envLdapAuth.startsWith('ldap') && Cypress.env('TEST_USER_USERNAME')) {
-    credentials = {
-      USERNAME: Cypress.env('TEST_USER_USERNAME'),
-      PASSWORD: Cypress.env('TEST_USER_PASSWORD'),
-      AUTH_TYPE: Cypress.env('TEST_USER_AUTH_TYPE'),
-    };
-  } else {
-    const vaultUser = Cypress.env('TEST_USER');
-    if (
-      vaultUser
-      && String(vaultUser.AUTH_TYPE || '').toLowerCase().startsWith('ldap')
-    ) {
-      credentials = vaultUser;
-    }
-  }
-  if (Cypress.env('MOCK')) {"""
-    if old_visit not in text:
-        print(
-            f"WARN: skip LDAP visitWithLogin patch; {app_ts.name} layout changed",
-            flush=True,
-        )
-        return
-    text = (
-        text.replace(old_visit, new_visit, 1)
-        .replace(old_403, new_403, 1)
-        .replace(old_url, new_url, 1)
-    )
-    app_ts.write_text(f"// {marker}\n" + text, encoding="utf-8")
-    print(f"✓ Patched {app_ts.name} for LDAP gateway login on BYOIDC pools", flush=True)
+    """Do not patch Cypress test code. Environment vars (TEST_USER_*, CLUSTER_AUTH) handle auth logic."""
+    pass
 
 
 def _find_envoyfilter_namespace(envoy_filter: str) -> str:
@@ -565,6 +368,9 @@ def inject_ci_auth_bypass(working_dir: Path) -> None:
 
 def load_component_vault_env() -> dict[str, str]:
     """Export vault secret keys into env (except config file keys loaded separately)."""
+    from k8s.jenkins_vault import ensure_runtime_vault_env
+
+    ensure_runtime_vault_env()
     out: dict[str, str] = {}
     if not _VAULT_MOUNT.is_dir():
         return out
@@ -587,9 +393,7 @@ def load_component_vault_env() -> dict[str, str]:
 def _default_runtime_config_overrides() -> dict[str, str]:
     """Cluster namespace defaults when vault CY_TEST_CONFIG is incomplete."""
     from components.dashboard_cypress.config import (
-        _DASHBOARD_CYPRESS_CONFIG_DEFAULTS,
-        resolve_odh_dashboard_project_name,
-    )
+      _DASHBOARD_CYPRESS_CONFIG_DEFAULTS, resolve_odh_dashboard_project_name)
 
     overrides = dict(_DASHBOARD_CYPRESS_CONFIG_DEFAULTS)
     project_name = resolve_odh_dashboard_project_name()
@@ -599,22 +403,12 @@ def _default_runtime_config_overrides() -> dict[str, str]:
 
 
 from components.dashboard_cypress.auth_overlay import (  # noqa: E402
-    _apply_gateway_auth_overlay,
-    _deep_merge_dict,
-    _load_yaml_dict,
-    _merge_cypress_s3_overlay,
-    _merge_test_clusters_into_runtime_config,
-    _yaml_scalar,
-    dashboard_url_is_local,
-    gateway_cypress_uses_bearer_bypass,
-    gateway_use_byoidc_auth,
-    validate_gateway_cypress_auth,
-    is_konflux_eaas_gateway_url,
-    resolve_gateway_auth_overlay,
-    resolve_test_clusters_overlay,
-    sync_cypress_auth_env_from_config,
-    _byoidc_cypress_poll_settings,
-)
+  _apply_gateway_auth_overlay, _byoidc_cypress_poll_settings, _deep_merge_dict,
+  _load_yaml_dict, _merge_cypress_s3_overlay,
+  _merge_test_clusters_into_runtime_config, _yaml_scalar,
+  dashboard_url_is_local, gateway_cypress_uses_bearer_bypass,
+  gateway_use_byoidc_auth, resolve_gateway_auth_overlay, resolve_test_clusters_overlay,
+  sync_cypress_auth_env_from_config, validate_gateway_cypress_auth)
 
 # Re-export auth overlay helpers for existing imports from runtime.
 
@@ -625,7 +419,7 @@ def htpasswd_hcp_extra_cypress_skip_tags(*, odh_dashboard_url: str) -> str:
         return ""
     if _ldap._cluster_is_byoidc():
         return ""
-    # Bearer EaaS must not inherit SHARED HCP skips (JP-cypress-EaaS-parity).
+    # Bearer EPHC must not inherit SHARED HCP skips (JP-cypress-EPHC-parity).
     if gateway_cypress_uses_bearer_bypass(odh_dashboard_url=odh_dashboard_url):
         return ""
     from install.ldap import cluster_has_ldap_identity
@@ -644,11 +438,11 @@ def byoidc_extra_cypress_skip_tags(*, odh_dashboard_url: str) -> str:
     return _BYOIDC_EXTRA_SKIP_TAGS
 
 
-def eaas_bearer_extra_cypress_skip_tags(*, odh_dashboard_url: str) -> str:
-    """No extra skipTags on bearer EaaS (JP-cypress-EaaS-parity vs regular-cluster smoke)."""
+def ephc_bearer_extra_cypress_skip_tags(*, odh_dashboard_url: str) -> str:
+    """No extra skipTags on bearer EPHC (JP-cypress-EPHC-parity vs regular-cluster smoke)."""
     if not gateway_cypress_uses_bearer_bypass(odh_dashboard_url=odh_dashboard_url):
         return ""
-    return _EAAS_BEARER_EXTRA_SKIP_TAGS
+    return _EHC_BEARER_EXTRA_SKIP_TAGS
 
 
 def konflux_olminstall_extra_cypress_skip_tags() -> str:
@@ -673,7 +467,7 @@ def cypress_extra_skip_tags(*, odh_dashboard_url: str) -> str:
     parts = [
         htpasswd_hcp_extra_cypress_skip_tags(odh_dashboard_url=odh_dashboard_url),
         byoidc_extra_cypress_skip_tags(odh_dashboard_url=odh_dashboard_url),
-        eaas_bearer_extra_cypress_skip_tags(odh_dashboard_url=odh_dashboard_url),
+        ephc_bearer_extra_cypress_skip_tags(odh_dashboard_url=odh_dashboard_url),
         konflux_olminstall_extra_cypress_skip_tags(),
         _automl_s3_skip_tags(),
     ]
@@ -726,15 +520,128 @@ def patch_runtime_cy_test_config(
     return str(runtime_cfg)
 
 
-def verify_dashboard_reachable(url: str) -> bool:
-    """HEAD request with retries; accept 200/302/403 (Jenkins verifyDashboardRoute)."""
-    print(f"Verify dashboard is accessible at {url}...", flush=True)
+def _is_ephc_cluster_source() -> bool:
+    """True for OpenShift CI / EPHC ephemeral clusters (not external kubeconfig secrets)."""
+    from suite.its_trigger_params import (CLUSTER_SOURCE_EPHC,
+                                          is_external_cluster_source)
+
+    source = os.environ.get("CLUSTER_SOURCE", "").strip()
+    if source == CLUSTER_SOURCE_EPHC:
+        return True
+    if is_external_cluster_source(source):
+        return False
+    # verify-operator-dashboard may run without CLUSTER_SOURCE in env when the cluster
+    # Task CR predates the param wiring; PRODUCT=rhoai|odh on a provisioned cluster is EPHC.
+    product = os.environ.get("PRODUCT", "").strip().lower()
+    return product in ("rhoai", "odh")
+
+
+def dashboard_hostname_from_url(url: str) -> str:
+    return (urlparse(url).hostname or "").strip()
+
+
+def dashboard_hostname_resolves(hostname: str) -> bool:
+    if not hostname:
+        return False
+    try:
+        socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+        return True
+    except socket.gaierror:
+        return False
+
+
+def wait_for_dashboard_hostname_dns(
+    hostname: str,
+    *,
+    timeout_sec: int,
+    poll_sec: int = 10,
+) -> bool:
+    if not hostname or dashboard_hostname_resolves(hostname):
+        return bool(hostname)
+    print(f"Waiting up to {timeout_sec}s for dashboard DNS ({hostname})...", flush=True)
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if dashboard_hostname_resolves(hostname):
+            print(f"✓ Dashboard hostname resolves: {hostname}", flush=True)
+            return True
+        time.sleep(poll_sec)
+    return dashboard_hostname_resolves(hostname)
+
+
+def _dashboard_curl_preflight_cmd(url: str) -> list[str]:
     headers: list[str] = []
     token = os.environ.get("OC_TOKEN", "").strip() or os.environ.get("CYPRESS_OC_TOKEN", "").strip()
     if token and ("127.0.0.1" in url or "localhost" in url):
         headers = ["-H", f"Authorization: Bearer {token}"]
+    return [
+        "curl",
+        "--head",
+        "--write-out",
+        "%{http_code}",
+        "--output",
+        "/dev/null",
+        "--insecure",
+        "--max-time",
+        "10",
+        "--connect-timeout",
+        "5",
+        "--retry",
+        "20",
+        "--retry-delay",
+        "5",
+        "--retry-max-time",
+        "180",
+        "--retry-all-errors",
+        "--no-progress-meter",
+        *headers,
+        url,
+    ]
+
+
+def dashboard_curl_preflight(url: str) -> tuple[str, str]:
+    """Return (http_code, stderr) from an external HEAD probe."""
     proc = subprocess.run(
+        _dashboard_curl_preflight_cmd(url),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+
+def _curl_http_code_absent(http_code: str) -> bool:
+    code = (http_code or "").strip()
+    return not code or code == "000"
+
+
+def curl_preflight_is_dns_failure(http_code: str, stderr: str) -> bool:
+    if not _curl_http_code_absent(http_code):
+        return False
+    text = (stderr or "").lower()
+    return "could not resolve host" in text or "curl: (6)" in text
+
+
+def verify_dashboard_reachable_in_cluster(url: str) -> bool:
+    """Probe dashboard URL from inside the workload cluster (EPHC external DNS lag)."""
+    name = f"dsh-preflight-{uuid.uuid4().hex[:8]}"
+    ns = (os.environ.get("DASHBOARD_PREFLIGHT_NAMESPACE") or "default").strip() or "default"
+    image = (
+        os.environ.get("DASHBOARD_IN_CLUSTER_PREFLIGHT_IMAGE")
+        or "quay.io/konflux-ci/konflux-test:stable"
+    ).strip()
+    wait_sec = int(os.environ.get("DASHBOARD_IN_CLUSTER_WAIT_SEC", "120"))
+    print(f"Verify dashboard in-cluster at {url} (pod/{name}, ns={ns})...", flush=True)
+    create = oc_run(
         [
+            "run",
+            name,
+            "-n",
+            ns,
+            "--image",
+            image,
+            "--restart=Never",
+            "--command",
+            "--",
             "curl",
             "--head",
             "--write-out",
@@ -743,26 +650,103 @@ def verify_dashboard_reachable(url: str) -> bool:
             "/dev/null",
             "--insecure",
             "--max-time",
-            "10",
+            "15",
             "--connect-timeout",
             "5",
             "--retry",
-            "20",
-            "--retry-delay",
             "5",
-            "--retry-max-time",
-            "180",
+            "--retry-delay",
+            "3",
             "--retry-all-errors",
             "--no-progress-meter",
-            *headers,
             url,
         ],
         check=False,
         capture_output=True,
-        text=True,
+        timeout=90,
     )
-    code = (proc.stdout or "").strip()
-    return code in _DASHBOARD_OK_HTTP
+    if create.returncode != 0:
+        err = (create.stderr or create.stdout or "").strip()
+        print(
+            f"WARN: in-cluster preflight pod create failed: {err[:200]}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    try:
+        oc_run(
+            [
+                "wait",
+                f"pod/{name}",
+                "-n",
+                ns,
+                "--for=jsonpath={.status.phase}=Succeeded",
+                f"--timeout={wait_sec}s",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=wait_sec + 30,
+        )
+        logs = oc_run(
+            ["logs", f"pod/{name}", "-n", ns],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        code = (logs.stdout or "").strip()
+        if code in _DASHBOARD_OK_HTTP:
+            print(f"✓ Dashboard in-cluster preflight ok (http={code})", flush=True)
+            return True
+        err = (logs.stderr or "").strip()
+        print(
+            f"WARN: in-cluster dashboard preflight failed (http={code or 'empty'}"
+            f"{f', logs: {err[:120]}' if err else ''})",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    finally:
+        oc_run(
+            ["delete", "pod", name, "-n", ns, "--ignore-not-found"],
+            check=False,
+            timeout=30,
+        )
+
+
+def dashboard_reachable_probe(url: str, *, allow_in_cluster: bool = True) -> tuple[bool, str]:
+    """Return (reachable, failure_kind). failure_kind is '' on success, else 'dns' or 'http'."""
+    code, err = dashboard_curl_preflight(url)
+    if code in _DASHBOARD_OK_HTTP:
+        return True, ""
+    if curl_preflight_is_dns_failure(code, err):
+        if allow_in_cluster and _is_ephc_cluster_source():
+            print(
+                "EPHC: external DNS unavailable from Tekton pod; trying in-cluster preflight...",
+                flush=True,
+            )
+            if verify_dashboard_reachable_in_cluster(url):
+                return True, ""
+        print(
+            f"WARN: dashboard DNS preflight failed (http={code or 'empty'}"
+            f"{f', curl: {err[:120]}' if err else ''})",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False, "dns"
+    print(
+        f"WARN: dashboard HTTP preflight failed (http={code or 'empty'}"
+        f"{f', curl: {err[:120]}' if err else ''})",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False, "http"
+
+
+def verify_dashboard_reachable(url: str) -> bool:
+    """HEAD request with retries; accept 200/302/403 (Jenkins verifyDashboardRoute)."""
+    print(f"Verify dashboard is accessible at {url}...", flush=True)
+    ok, _failure_kind = dashboard_reachable_probe(url)
+    return ok
 
 
 def _gateway_html_preflight_timeout_sec() -> int:
@@ -802,14 +786,132 @@ def _curl_response_content_type(url: str, *, follow_redirects: bool = True) -> t
         cmd.extend(["--location", "--max-redirs", "8"])
     cmd.append(url)
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    raw = (proc.stdout or "") + (proc.stderr or "")
-    lines = raw.splitlines()
+    # Separate stdout (headers + code) from stderr (curl errors)
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    lines = stdout.splitlines()
     code = lines[-1].strip() if lines else ""
     content_type = ""
     for line in lines:
         if line.lower().startswith("content-type:"):
             content_type = line.split(":", 1)[1].strip()
+
+    if not code or code == "000":
+        # If stdout is empty or zero, check if stderr has a DNS error
+        if "could not resolve host" in stderr.lower() or "curl: (6)" in stderr:
+            # Prepend 000 so verify_dashboard_serves_html triggers EPHC fallback
+            code = f"000 {stderr.strip()}" if stderr.strip() else "000"
+
     return code, content_type
+
+
+def verify_dashboard_serves_html_in_cluster(url: str, *, timeout_sec: int) -> bool:
+    """GET dashboard URL from inside the workload cluster and check for HTML content."""
+    name = f"dsh-html-preflight-{uuid.uuid4().hex[:8]}"
+    ns = (os.environ.get("DASHBOARD_PREFLIGHT_NAMESPACE") or "default").strip() or "default"
+    image = (
+        os.environ.get("DASHBOARD_IN_CLUSTER_PREFLIGHT_IMAGE")
+        or "quay.io/konflux-ci/konflux-test:stable"
+    ).strip()
+    print(f"Verify dashboard HTML in-cluster at {url} (pod/{name}, ns={ns})...", flush=True)
+    # GET request following redirects, checking for text/html content-type.
+    # Output format: CONTENT-TYPE: <type>\nHTTP-CODE: <code>
+    cmd = [
+        "curl",
+        "-sS",
+        "-D",
+        "-",
+        "-o",
+        "/dev/null",
+        "--write-out",
+        "HTTP-CODE: %{http_code}",
+        "--insecure",
+        "--location",
+        "--max-redirs",
+        "8",
+        "--max-time",
+        "15",
+        "--connect-timeout",
+        "5",
+        "--no-progress-meter",
+        url,
+    ]
+    create = oc_run(
+        [
+            "run",
+            name,
+            "-n",
+            ns,
+            "--image",
+            image,
+            "--restart=Never",
+            "--command",
+            "--",
+            "bash",
+            "-c",
+            " ".join(cmd) + " | grep -iE '^(content-type:|HTTP-CODE:)'",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=90,
+    )
+    if create.returncode != 0:
+        err = (create.stderr or create.stdout or "").strip()
+        print(
+            f"WARN: in-cluster HTML preflight pod create failed: {err[:200]}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    try:
+        oc_run(
+            [
+                "wait",
+                f"pod/{name}",
+                "-n",
+                ns,
+                "--for=jsonpath={.status.phase}=Succeeded",
+                f"--timeout={timeout_sec}s",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=timeout_sec + 30,
+        )
+        logs_proc = oc_run(
+            ["logs", f"pod/{name}", "-n", ns],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        logs = (logs_proc.stdout or "").strip()
+        code = ""
+        content_type = ""
+        for line in logs.splitlines():
+            if line.lower().startswith("content-type:"):
+                content_type = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("HTTP-CODE:"):
+                code = line.split(":", 1)[1].strip()
+
+        if _content_type_is_html(content_type):
+            print(
+                f"✓ Dashboard in-cluster HTML preflight ok (http={code}, type={content_type})",
+                flush=True,
+            )
+            return True
+
+        print(
+            f"WARN: in-cluster dashboard HTML preflight failed (http={code or 'empty'}, "
+            f"type={content_type or 'missing'})",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    finally:
+        oc_run(
+            ["delete", "pod", name, "-n", ns, "--ignore-not-found"],
+            check=False,
+            timeout=30,
+        )
 
 
 def verify_dashboard_serves_html(url: str, *, timeout_sec: int | None = None) -> bool:
@@ -818,7 +920,8 @@ def verify_dashboard_serves_html(url: str, *, timeout_sec: int | None = None) ->
     HEAD can pass with 302 while a subsequent GET still returns ``text/plain`` under
     Authorino/OAP load; Cypress requires ``text/html`` for ``cy.visit()``.
     """
-    deadline = time.time() + (timeout_sec if timeout_sec is not None else _gateway_html_preflight_timeout_sec())
+    total_timeout = timeout_sec if timeout_sec is not None else _gateway_html_preflight_timeout_sec()
+    deadline = time.time() + total_timeout
     poll_sec = 5
     attempt = 0
     last_code, last_ctype = "", ""
@@ -833,6 +936,17 @@ def verify_dashboard_serves_html(url: str, *, timeout_sec: int | None = None) ->
                 flush=True,
             )
             return True
+
+        # Fall back to in-cluster if external DNS fails on EPHC
+        if (not last_code or last_code.startswith("000")) and _is_ephc_cluster_source():
+            print(
+                "EPHC: external DNS unavailable for HTML preflight; trying in-cluster...",
+                flush=True,
+            )
+            rem = int(max(0, deadline - time.time()))
+            if verify_dashboard_serves_html_in_cluster(url, timeout_sec=rem):
+                return True
+
         # OAuth authorize redirect without following still counts if Location is oauth HTML flow
         if last_code == "302" and not last_ctype:
             code2, ctype2 = _curl_response_content_type(url, follow_redirects=False)
@@ -847,7 +961,7 @@ def verify_dashboard_serves_html(url: str, *, timeout_sec: int | None = None) ->
             )
         time.sleep(poll_sec)
     print(
-        f"ERROR: dashboard did not serve HTML after {_gateway_html_preflight_timeout_sec()}s "
+        f"ERROR: dashboard did not serve HTML after {total_timeout}s "
         f"(last http={last_code or '?'} content-type={last_ctype or 'missing'})",
         file=sys.stderr,
         flush=True,
@@ -907,9 +1021,8 @@ def verify_gateway_stack_healthy() -> bool:
 
 def gateway_auth_stack_ready() -> bool:
     """Return False when Kuadrant/Authorino gaps can cause gateway 503 under load."""
-    from install.dependency_operators import maas_dependency_operators_ready
-
     from components.maas_billing.auth import authorino_workload_tls_ready
+    from install.dependency_operators import maas_dependency_operators_ready
 
     ready = True
     if not maas_dependency_operators_ready():
@@ -940,7 +1053,8 @@ def _prepend_pythonpath(entry: str) -> None:
 
 def prepend_staged_python_deps() -> bool:
     """Expose staged .tools/python on PYTHONPATH when orchestrate installed PyYAML."""
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_python_dir
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_python_dir)
 
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
     target = tests_payload_tools_python_dir(resolve_tests_payload_root(artifacts))
@@ -988,7 +1102,8 @@ def _ensure_pyyaml_available() -> None:
             "PyYAML not available in the Cypress image and pip is missing; "
             "orchestrate step should stage .tools/python"
         )
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_python_dir
+    from steps.tests_payload import (resolve_tests_payload_root,
+                                     tests_payload_tools_python_dir)
 
     artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
     target = tests_payload_tools_python_dir(resolve_tests_payload_root(artifacts))

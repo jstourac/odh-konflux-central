@@ -37,8 +37,47 @@ class DashboardVerifyRouteTest(unittest.TestCase):
         self.assertFalse(wait_all_cluster_deployments_available(timeout_sec=30))
         self.assertEqual(oc_run_mock.call_count, 3)
 
+    @patch.dict(os.environ, {"CLUSTER_SOURCE": "rh-nightly-pm-kubeconfig"}, clear=False)
+    @patch("components.dashboard_cypress.verify_route.oc_run")
+    def test_wait_deployments_scoped_on_external_cluster(self, oc_run_mock: object) -> None:
+        from components.dashboard_cypress.verify_route import wait_all_cluster_deployments_available
+
+        def _oc_side_effect(cmd: list[str], **_kwargs: object) -> object:
+            if cmd[:3] == ["get", "deployments", "-A"]:
+                return type("R", (), {
+                    "returncode": 0,
+                    "stdout": json.dumps({"items": [
+                        {"metadata": {"namespace": "mohd", "name": "llamastack"}},
+                        {"metadata": {"namespace": "redhat-ods-applications", "name": "rhods-dashboard"}},
+                    ]}),
+                    "stderr": "",
+                })()
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        oc_run_mock.side_effect = _oc_side_effect
+        self.assertTrue(wait_all_cluster_deployments_available(timeout_sec=30))
+        self.assertEqual(oc_run_mock.call_count, 2)
+        joined = " ".join(str(call) for call in oc_run_mock.call_args_list)
+        self.assertIn("rhods-dashboard", joined)
+        self.assertNotIn("llamastack", joined)
+
+    @patch.dict(
+        os.environ,
+        {"PRODUCT": "rhoai", "CLUSTER_SOURCE": "olminstall-kubeconfig-rh-nightly-pm-nmanos"},
+        clear=False,
+    )
+    def test_rhoai_external_default_deploy_wait_is_600s(self) -> None:
+        from components.dashboard_cypress.verify_route import _default_deployment_wait_sec
+
+        self.assertEqual(_default_deployment_wait_sec(), 600)
+
+    @patch("components.dashboard_cypress.verify_route._is_ephc_cluster_source", return_value=False)
+    @patch("components.dashboard_cypress.verify_route._wait_rhoai_core_deployments", return_value=True)
     @patch("components.dashboard_cypress.verify_route._repair_gateway_stack_for_verify")
-    @patch("components.dashboard_cypress.verify_route.verify_dashboard_reachable", return_value=True)
+    @patch(
+        "components.dashboard_cypress.verify_route.dashboard_reachable_probe",
+        return_value=(True, ""),
+    )
     @patch("components.dashboard_cypress.verify_route._dashboard_ready_status", return_value="True")
     @patch("components.dashboard_cypress.verify_route.wait_all_cluster_deployments_available", return_value=True)
     @patch(
@@ -53,7 +92,10 @@ class DashboardVerifyRouteTest(unittest.TestCase):
             )
 
     @patch("components.dashboard_cypress.verify_route._repair_gateway_stack_for_verify")
-    @patch("components.dashboard_cypress.verify_route.verify_dashboard_reachable", return_value=True)
+    @patch(
+        "components.dashboard_cypress.verify_route.dashboard_reachable_probe",
+        return_value=(True, ""),
+    )
     @patch("components.dashboard_cypress.verify_route._dashboard_ready_status", return_value="True")
     @patch("components.dashboard_cypress.verify_route.wait_all_cluster_deployments_available", return_value=True)
     @patch(
@@ -67,7 +109,10 @@ class DashboardVerifyRouteTest(unittest.TestCase):
         )
 
     @patch("components.dashboard_cypress.verify_route._repair_gateway_stack_for_verify")
-    @patch("components.dashboard_cypress.verify_route.verify_dashboard_reachable", return_value=True)
+    @patch(
+        "components.dashboard_cypress.verify_route.dashboard_reachable_probe",
+        return_value=(True, ""),
+    )
     @patch("components.dashboard_cypress.verify_route._dashboard_ready_status", return_value="False")
     @patch("components.dashboard_cypress.verify_route.wait_all_cluster_deployments_available", return_value=False)
     @patch(
@@ -80,9 +125,12 @@ class DashboardVerifyRouteTest(unittest.TestCase):
             "https://rh-ai.apps.example.com",
         )
 
-    @patch.dict(os.environ, {"PRODUCT": "existing"}, clear=False)
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
     @patch("components.dashboard_cypress.verify_route._repair_gateway_stack_for_verify")
-    @patch("components.dashboard_cypress.verify_route.verify_dashboard_reachable", return_value=True)
+    @patch(
+        "components.dashboard_cypress.verify_route.dashboard_reachable_probe",
+        return_value=(True, ""),
+    )
     @patch("components.dashboard_cypress.verify_route._dashboard_ready_status", return_value="True")
     @patch("components.dashboard_cypress.verify_route.wait_all_cluster_deployments_available", return_value=True)
     @patch(
@@ -96,9 +144,34 @@ class DashboardVerifyRouteTest(unittest.TestCase):
         )
         self.assertTrue(repair_mock.called)
 
-    @patch.dict(os.environ, {"PRODUCT": "existing"}, clear=False)
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
     @patch("components.dashboard_cypress.verify_route._repair_gateway_stack_for_verify")
-    @patch("components.dashboard_cypress.verify_route.verify_dashboard_reachable", return_value=False)
+    @patch(
+        "components.dashboard_cypress.verify_route.dashboard_reachable_probe",
+        side_effect=[(False, "http"), (True, "")],
+    )
+    @patch("components.dashboard_cypress.verify_route._dashboard_ready_status", return_value="True")
+    @patch("components.dashboard_cypress.verify_route.wait_all_cluster_deployments_available", return_value=True)
+    @patch(
+        "components.dashboard_cypress.verify_route.resolve_odh_dashboard_base_url",
+        return_value="https://rh-ai.apps.example.com",
+    )
+    @patch("components.dashboard_cypress.verify_route.time.sleep")
+    def test_wait_reruns_gateway_repair_when_http_preflight_fails(
+        self, _sleep: object, repair_mock: object, *_mocks: object
+    ) -> None:
+        self.assertEqual(
+            wait_for_dashboard_route(timeout_sec=60, poll_sec=0, deployment_wait_sec=1),
+            "https://rh-ai.apps.example.com",
+        )
+        self.assertGreaterEqual(repair_mock.call_count, 2)
+
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
+    @patch("components.dashboard_cypress.verify_route._repair_gateway_stack_for_verify")
+    @patch(
+        "components.dashboard_cypress.verify_route.dashboard_reachable_probe",
+        return_value=(False, "http"),
+    )
     @patch("components.dashboard_cypress.verify_route._dashboard_ready_status", return_value="True")
     @patch("components.dashboard_cypress.verify_route.wait_all_cluster_deployments_available", return_value=True)
     @patch(
@@ -111,7 +184,10 @@ class DashboardVerifyRouteTest(unittest.TestCase):
             wait_for_dashboard_route(timeout_sec=1, poll_sec=0, deployment_wait_sec=0)
 
     @patch("components.dashboard_cypress.verify_route._repair_gateway_stack_for_verify")
-    @patch("components.dashboard_cypress.verify_route.verify_dashboard_reachable", return_value=False)
+    @patch(
+        "components.dashboard_cypress.verify_route.dashboard_reachable_probe",
+        return_value=(False, "http"),
+    )
     @patch("components.dashboard_cypress.verify_route._dashboard_ready_status", return_value="False")
     @patch("components.dashboard_cypress.verify_route.wait_all_cluster_deployments_available", return_value=True)
     @patch("components.dashboard_cypress.verify_route.resolve_odh_dashboard_base_url", return_value="")
@@ -131,23 +207,51 @@ class DashboardVerifyRouteTest(unittest.TestCase):
             self.assertTrue(cfg.is_file())
             self.assertIn("ODH_DASHBOARD_URL: https://dash.example.com", cfg.read_text(encoding="utf-8"))
 
-    @patch.dict(os.environ, {"PRODUCT": "existing"}, clear=False)
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
     @patch("components.dashboard_cypress.verify_route.verify_dashboard_reachable", return_value=False)
     def test_dashboard_cypress_accessible_for_smoke_requires_curl(self, *_mocks: object) -> None:
         from components.dashboard_cypress.verify_route import dashboard_cypress_accessible_for_smoke
 
         self.assertFalse(dashboard_cypress_accessible_for_smoke(url="https://rh-ai.example.com"))
 
-    @patch.dict(os.environ, {"PRODUCT": "existing"}, clear=False)
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
     @patch("components.dashboard_cypress.verify_route.verify_dashboard_reachable", return_value=True)
     def test_dashboard_cypress_accessible_for_smoke_when_curl_ok(self, *_mocks: object) -> None:
         from components.dashboard_cypress.verify_route import dashboard_cypress_accessible_for_smoke
 
         self.assertTrue(dashboard_cypress_accessible_for_smoke(url="https://rh-ai.example.com"))
 
-    @patch.dict(os.environ, {"PRODUCT": "existing"}, clear=False)
-    def test_dashboard_cypress_accessible_for_smoke_requires_url(self) -> None:
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
+    @patch(
+        "components.dashboard_cypress.verify_route.resolve_odh_dashboard_base_url",
+        return_value="",
+    )
+    def test_dashboard_cypress_accessible_for_smoke_requires_url(self, *_mocks: object) -> None:
         from components.dashboard_cypress.verify_route import dashboard_cypress_accessible_for_smoke
 
-        self.assertFalse(dashboard_cypress_accessible_for_smoke(url=""))
+        self.assertFalse(dashboard_cypress_accessible_for_smoke())
+
+    @patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False)
+    @patch("components.dashboard_cypress.verify_route.time.sleep")
+    @patch(
+        "components.dashboard_cypress.verify_route.resolve_odh_dashboard_base_url",
+        return_value="https://rh-ai.apps.c36f3275a966f14785b9.prod.konflux-ocp-ci.dev",
+    )
+    @patch("components.dashboard_cypress.verify_route.wait_all_cluster_deployments_available", return_value=True)
+    @patch("components.dashboard_cypress.verify_route._dashboard_ready_status", return_value="True")
+    @patch("components.dashboard_cypress.verify_route.wait_for_dashboard_hostname_dns", return_value=False)
+    @patch("components.dashboard_cypress.verify_route.dashboard_hostname_resolves", return_value=False)
+    @patch(
+        "components.dashboard_cypress.verify_route.dashboard_reachable_probe",
+        side_effect=[(False, "dns"), (True, "")],
+    )
+    @patch("components.dashboard_cypress.verify_route._repair_gateway_stack_for_verify")
+    def test_wait_skips_gateway_repair_on_dns_failure(
+        self, repair_mock: object, *_mocks: object
+    ) -> None:
+        self.assertEqual(
+            wait_for_dashboard_route(timeout_sec=60, poll_sec=0, deployment_wait_sec=1),
+            "https://rh-ai.apps.c36f3275a966f14785b9.prod.konflux-ocp-ci.dev",
+        )
+        self.assertEqual(repair_mock.call_count, 1)
 

@@ -46,15 +46,16 @@ def test_prepare_skips_when_collect_only() -> None:
 
 def test_prepare_skips_when_no_components_selected() -> None:
     with patch("runners.orchestrator.selected_component_ids", return_value=set()):
-        with patch("runners.orchestrator.prepare_components_for_smoke") as prep:
-            with (
-                patch("runners.orchestrator.stage_git_for_prereqs"),
-                patch("runners.orchestrator.stage_oc_for_pytest"),
-                patch("runners.orchestrator.mark_cluster_prep_done") as mark,
-            ):
-                prepare_cluster_for_components(collect_only=False)
-                prep.assert_not_called()
-                mark.assert_not_called()
+        with patch("runners.orchestrator.wait_gateway_config_ready", return_value=True):
+            with patch("runners.orchestrator.prepare_components_for_smoke") as prep:
+                with (
+                    patch("runners.orchestrator.stage_git_for_prereqs"),
+                    patch("runners.orchestrator.stage_oc_for_pytest"),
+                    patch("runners.orchestrator.mark_cluster_prep_done") as mark,
+                ):
+                    prepare_cluster_for_components(collect_only=False)
+                    prep.assert_not_called()
+                    mark.assert_not_called()
 
 def test_prepare_marks_cluster_prep_done(tmp_path, monkeypatch) -> None:
     payload = tmp_path / "tests-payload" / "results"
@@ -62,6 +63,7 @@ def test_prepare_marks_cluster_prep_done(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("ARTIFACTS_DIR", str(payload))
     with patch("runners.orchestrator.selected_component_ids", return_value={"dashboard_cypress"}):
         with (
+            patch("runners.orchestrator.wait_gateway_config_ready", return_value=True),
             patch("runners.orchestrator.prepare_components_for_smoke") as prep,
             patch("runners.orchestrator.load_shift_left_env_from_mount"),
             patch("runners.orchestrator.stage_git_for_prereqs"),
@@ -85,7 +87,7 @@ def test_prepare_component_runs_pooled_cleanup_when_marker_set(tmp_path, monkeyp
     payload.mkdir(parents=True)
     monkeypatch.setenv("ARTIFACTS_DIR", str(payload))
     monkeypatch.setenv("CLUSTER_SOURCE", "olminstall-kubeconfig-psi-23")
-    monkeypatch.setenv("PRODUCT", "existing")
+    monkeypatch.setenv("PRODUCT", "")
     mark_cluster_prep_done(payload)
     with (
         patch("runners.component_prereqs.run_pooled_external_smoke_prep") as pooled,
@@ -108,3 +110,24 @@ def test_remove_staged_pyyaml_binaries_drops_directory(tmp_path) -> None:
     assert not stale_dir.exists()
     assert not stale_file.exists()
     assert (target / "yaml" / "__init__.py").is_file()
+
+
+def test_prepare_oc_binary_path_for_pytest_sets_oc_binary_path(tmp_path, monkeypatch) -> None:
+    artifacts = tmp_path / "artifacts"
+    tools_bin = artifacts / "tests-payload" / ".tools" / "bin"
+    tools_bin.mkdir(parents=True)
+    staged = tools_bin / "oc"
+    staged.write_bytes(b"")
+    staged.chmod(0o755)
+    monkeypatch.setenv("ARTIFACTS_DIR", str(artifacts))
+    monkeypatch.delenv("OC_BINARY_PATH", raising=False)
+    prev_path = os.environ.get("PATH", "")
+    from runners.orchestrator import prepare_oc_binary_path_for_pytest
+
+    try:
+        prepare_oc_binary_path_for_pytest()
+        assert os.environ.get("OC_BINARY_PATH") == str(staged)
+        assert str(tools_bin) in os.environ.get("PATH", "")
+    finally:
+        os.environ["PATH"] = prev_path
+        os.environ.pop("OC_BINARY_PATH", None)

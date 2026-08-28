@@ -6,6 +6,10 @@ defusedxml>=0.7.1
 pyyaml>=6.0
 # pytest: pipeline unit tests under integration-tests/olminstall/unit_tests/ (not cluster BVT/smoke)
 pytest>=7.0
+# pytest-xdist: parallel unit test runs (make test)
+pytest-xdist>=3.0
+# pytest-timeout: fail any single unit test that hangs (default 10s in pytest.ini)
+pytest-timeout>=2.1
 #
 # Runtime binaries (install separately): oc (required), tkn (optional; trigger-mode log stream),
 # yq (for ITS overrides and YAML→JSON when PyYAML is absent), skopeo (optional, ODH catalog fallback).

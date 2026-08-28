@@ -22,6 +22,10 @@ from _bootstrap import ensure_olminstall_path
 
 ensure_olminstall_path()
 
+from runners.report.check_requested_gates_ran import (
+    format_install_blocked_publish_note,
+    upstream_blocked_test_gates,
+)
 from runners.report.pipeline_test_outputs import (
     build_finalize_test_output_from_taskruns,
     konflux_failure_test_output_json,
@@ -67,9 +71,14 @@ def main() -> int:
         )
     else:
         pr_name = os.environ.get("PIPELINE_RUN_NAME", "").strip() or "unknown"
-        text = konflux_failure_test_output_json(
-            note=f"PipelineRun {pr_name}: no workspace gate TEST_OUTPUT sidecars",
-        )
+        blockers = upstream_blocked_test_gates()
+        if blockers:
+            note = format_install_blocked_publish_note(blockers, test_gates=test_gates)
+            text = konflux_failure_test_output_json(note=note)
+        else:
+            text = konflux_failure_test_output_json(
+                note=f"PipelineRun {pr_name}: no workspace gate TEST_OUTPUT sidecars",
+            )
 
     write_result(result_path, text)
     print(f"Wrote pipeline TEST_OUTPUT from workspace ({len(text)} chars) to {result_path}")

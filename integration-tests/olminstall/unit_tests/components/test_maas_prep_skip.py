@@ -191,6 +191,11 @@ def test_maas_billing_prep_enables_models_as_service_after_gateway() -> None:
         return _fn
 
     with (
+        patch("helpers.hypershift_admission_webhooks.neutralize_broken_hypershift_admission_webhooks"),
+        patch("components.maas_billing.gateway.ensure_openshift_default_gateway_class"),
+        patch("components.maas_billing.auth.recover_kuadrant_after_gateway_api_provider"),
+        patch("components.maas_billing.common._dsc_condition", return_value=("False", "", "")),
+        patch("steps.cluster_prep_state.maas_gateway_https_blocked_reason", return_value=""),
         patch("components.maas_billing.prep.maas_gateway_mas_already_done", return_value=False),
         patch("components.maas_billing.prep.ensure_maas_gateway_ingress_tls_secret"),
         patch("components.maas_billing.prep.ensure_authorino_tls"),
@@ -208,7 +213,7 @@ def test_maas_billing_prep_enables_models_as_service_after_gateway() -> None:
         assert call_order.index("gateway") < call_order.index("models_as_service")
 
 def test_maas_prep_probes_only_on_existing_without_install_dependencies(monkeypatch) -> None:
-    monkeypatch.setenv("PRODUCT", "existing")
+    monkeypatch.setenv("PRODUCT", "")
     monkeypatch.delenv("INSTALL_DEPENDENCIES", raising=False)
 
     with ExitStack() as stack:
@@ -216,9 +221,12 @@ def test_maas_prep_probes_only_on_existing_without_install_dependencies(monkeypa
         _enter_patch(stack, "components.maas_billing.prep.dep_operators_already_done", return_value=False)
         rhcl = _enter_patch(stack, "components.maas_billing.prep.ensure_maas_rhcl_dependency_stack")
         probe = _enter_patch(stack, "components.maas_billing.prep.require_maas_dependency_operators")
+        _enter_patch(stack, "components.maas_billing.prep.repair_payload_pre_processing_selector_conflict", return_value=False)
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_route")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_before_models_as_service")
+        _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_stale_gateway_leaks")
+        _enter_patch(stack, "components.maas_billing.prep.maas_api_deployment_exists", return_value=True)
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_database")
         _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_leaked_rbac")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_bbr_pre_processing")
@@ -256,6 +264,8 @@ def test_maas_prep_runs_once_per_prepare_pass(tmp_path, monkeypatch) -> None:
             stack,
             "components.maas_billing.prep.ensure_maas_gateway_before_models_as_service",
         )
+        _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_stale_gateway_leaks")
+        _enter_patch(stack, "components.maas_billing.prep.maas_api_deployment_exists", return_value=True)
         _enter_patch(stack, "components.maas_billing.prep.dep_operators_already_done", return_value=True)
         _enter_patch(
             stack,
@@ -291,12 +301,18 @@ def test_maas_prep_marks_surface_done_when_wait_raises(tmp_path, monkeypatch) ->
         _enter_patch(stack, "components.maas_billing.prep.dep_operators_already_done", return_value=True)
         _enter_patch(
             stack,
+            "components.maas_billing.prep.repair_payload_pre_processing_selector_conflict",
+            return_value=False,
+        )
+        _enter_patch(
+            stack,
             "components.maas_billing.prep.maas_smoke_surface_already_done",
             return_value=False,
         )
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_route")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_before_models_as_service")
+        _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_stale_gateway_leaks")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_database")
         _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_leaked_rbac")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_bbr_pre_processing")
@@ -366,6 +382,11 @@ def test_maas_prep_retries_rhcl_when_incomplete_marker_after_dep_ops(tmp_path, m
             "components.maas_billing.prep.ensure_maas_authorino_ready",
             return_value="kuadrant-system",
         )
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_api_auth_policy")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_auth_policy_alias")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_auth_policy_ready")
+        _enter_patch(stack, "components.maas_billing.prep._wait_for_maas_smoke_ready")
+        _enter_patch(stack, "components.maas_billing.prep.mark_maas_smoke_surface_done")
         _enter_patch(stack, "components.maas_billing.prep.maas_api_deployment_exists", return_value=False)
         maas_prep.try_prepare_maas_smoke()
     rhcl.assert_called_once()
@@ -400,18 +421,95 @@ def test_maas_prep_skips_after_auth_wait_attempted(tmp_path, monkeypatch) -> Non
     gateway.assert_not_called()
 
 
-def test_maas_prep_defers_auth_when_maas_api_missing() -> None:
+def test_maas_prep_force_retry_after_auth_wait_attempted(tmp_path, monkeypatch) -> None:
+    payload = tmp_path / "tests-payload" / "results"
+    payload.mkdir(parents=True)
+    monkeypatch.setenv("TESTS_SHARED", str(tmp_path))
+    monkeypatch.setenv("PIPELINE_RUN_NAME", "pr-maas-force-retry")
+
+    from steps.cluster_prep_state import mark_maas_smoke_prep_attempted
+
+    mark_maas_smoke_prep_attempted(payload)
+
+    with ExitStack() as stack:
+        _enter_patch(stack, "install.dsc_install.dsc_crd_available", return_value=True)
+        _enter_patch(stack, "components.maas_billing.prep.dep_operators_already_done", return_value=True)
+        _enter_patch(
+            stack,
+            "components.maas_billing.prep.maas_smoke_surface_already_done",
+            return_value=False,
+        )
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_before_models_as_service")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_database")
+        _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_leaked_rbac")
+        _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_stale_gateway_leaks")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_bbr_pre_processing")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_user_workload_monitoring")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_authorino_ready", return_value="authorino")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_api_auth_policy")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_auth_policy_alias")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_auth_policy_ready")
+        wait_ready = _enter_patch(stack, "components.maas_billing.prep._wait_for_maas_smoke_ready")
+        _enter_patch(stack, "components.maas_billing.prep.mark_maas_smoke_surface_done")
+        maas_prep.try_prepare_maas_smoke(force_retry=True)
+    wait_ready.assert_called_once()
+
+
+def test_maas_prep_waits_for_models_as_service_before_auth_policy() -> None:
+    """Operator creates maas-api after ModelsAsService reconcile; wait DSC before auth (n2bqt/4sknz)."""
+    call_order: list[str] = []
+
+    def _track(name: str):
+        def _inner(*_a, **_kw):
+            call_order.append(name)
+
+        return _inner
+
+    with ExitStack() as stack:
+        _enter_patch(stack, "install.dsc_install.dsc_crd_available", return_value=True)
+        _enter_patch(stack, "components.maas_billing.prep.dep_operators_already_done", return_value=True)
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_before_models_as_service")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_database")
+        _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_leaked_rbac")
+        _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_stale_gateway_leaks")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_bbr_pre_processing")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_user_workload_monitoring")
+        _enter_patch(
+            stack,
+            "components.maas_billing.prep.ensure_maas_authorino_ready",
+            return_value="authorino",
+        )
+        _enter_patch(stack, "components.maas_billing.prep.maas_api_deployment_exists", return_value=False)
+        stack.enter_context(
+            patch(
+                "components.maas_billing.prep._wait_for_maas_smoke_ready",
+                side_effect=_track("wait_smoke"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "components.maas_billing.prep.ensure_maas_api_auth_policy",
+                side_effect=_track("auth_policy"),
+            )
+        )
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_auth_policy_alias")
+        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_auth_policy_ready")
+        _enter_patch(stack, "components.maas_billing.prep.mark_maas_smoke_surface_done")
+        maas_prep.try_prepare_maas_smoke()
+    assert call_order.index("wait_smoke") < call_order.index("auth_policy")
+
+
+def test_maas_prep_defers_auth_wait_before_install_rhoai_when_maas_api_missing() -> None:
+    """install-dep-operators runs before install-rhoai; do not wait for maas-api there."""
     with ExitStack() as stack:
         _enter_patch(stack, "install.dsc_install.dsc_crd_available", return_value=True)
         _enter_patch(stack, "components.maas_billing.prep.dep_operators_already_done", return_value=False)
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_rhcl_dependency_stack")
         _enter_patch(stack, "components.maas_billing.prep.require_maas_dependency_operators")
-        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway")
-        _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_route")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_gateway_before_models_as_service")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_database")
         _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_leaked_rbac")
-        _enter_patch(stack, "components.maas_billing.prep.ensure_dsc_models_as_service")
+        _enter_patch(stack, "components.maas_billing.prep.cleanup_maas_smoke_stale_gateway_leaks")
         _enter_patch(stack, "components.maas_billing.prep.ensure_maas_bbr_pre_processing")
         _enter_patch(stack, "components.maas_billing.prep.ensure_user_workload_monitoring")
         _enter_patch(
@@ -421,11 +519,7 @@ def test_maas_prep_defers_auth_when_maas_api_missing() -> None:
         )
         _enter_patch(stack, "components.maas_billing.prep.maas_api_deployment_exists", return_value=False)
         auth_policy = _enter_patch(stack, "components.maas_billing.prep.ensure_maas_api_auth_policy")
-        auth_ready = _enter_patch(stack, "components.maas_billing.prep.ensure_maas_auth_policy_ready")
-        wait_ready = _enter_patch(stack, "components.maas_billing.prep._wait_for_maas_smoke_ready")
-        mark_done = _enter_patch(stack, "components.maas_billing.prep.mark_maas_smoke_surface_done")
+        mark_attempted = _enter_patch(stack, "components.maas_billing.prep.mark_maas_smoke_prep_attempted")
         maas_prep.try_prepare_maas_smoke()
     auth_policy.assert_not_called()
-    auth_ready.assert_not_called()
-    wait_ready.assert_not_called()
-    mark_done.assert_not_called()
+    mark_attempted.assert_not_called()

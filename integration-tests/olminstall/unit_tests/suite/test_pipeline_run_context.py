@@ -39,7 +39,7 @@ class PipelineRunContextTest(unittest.TestCase):
 
     def test_rh_nightly_catalog_sync_log_lines(self) -> None:
         lines = build_pipeline_run_context_lines(
-            pipelinerun_name="e2e-its-rh-nightly-pm-bvt-smoke-2gh84",
+            pipelinerun_name="e2e-its-rh-nightly-pm-smoke-2gh84",
             trigger_type=TRIGGER_TYPE_RH_NIGHTLY_AUTO,
             konflux_event="push",
             snapshot_name="rh-nightly-snap-4mh9f",
@@ -108,7 +108,7 @@ class PipelineRunContextTest(unittest.TestCase):
     def test_context_from_pipelinerun_json(self) -> None:
         prj = {
             "metadata": {
-                "name": "e2e-its-rh-nightly-pm-bvt-smoke-2gh84",
+                "name": "e2e-its-rh-nightly-pm-smoke-2gh84",
                 "annotations": {
                     "olminstall.trigger-type": TRIGGER_TYPE_RH_NIGHTLY_AUTO,
                     "olminstall.trigger-command": "python3 integration-tests/olminstall/olm_pipeline.py --enable-its rhoai-e2e-rh-nightly-pm-ocp420",
@@ -146,7 +146,7 @@ class PipelineRunContextTest(unittest.TestCase):
             },
             fbc_component="rhoai-fbc-fragment-ocp-421",
             cluster_source="olminstall-kubeconfig-nmanos-konflux1-nmanos",
-            product="existing",
+            product="",
             test_gates="bvt,smoke",
         )
         msg = build_pipeline_run_context_message(**ctx)

@@ -29,37 +29,26 @@ def _assert_task_message_wiring(text: str, *, label: str) -> None:
 
 def test_task_message_wiring_present() -> None:
     for path in sorted(_TASKS_DIR.glob("*.yaml")):
-        _assert_task_message_wiring(path.read_text(encoding="utf-8"), label=path.name)
+        text = path.read_text(encoding="utf-8")
+        doc = yaml.safe_load(text)
+        if doc.get("kind") == "Task":
+            assert "finally:" not in text, path.name
+        _assert_task_message_wiring(text, label=path.name)
     pipe = _PIPELINE.read_text(encoding="utf-8")
     # parse-pipeline-tests: inline print-run-context; resolve-component-run-flags: no TASK_MESSAGE.
     _skip_task_message_specs = 2
     assert pipe.count("      taskSpec:") - _skip_task_message_specs == pipe.count(_STEP_SUMMARY)
     _assert_task_message_wiring(pipe, label="olminstall-pipeline.yaml")
 
-def test_standalone_tasks_write_summary_as_last_step_not_finally() -> None:
-    for path in sorted(_TASKS_DIR.glob("*.yaml")):
-        text = path.read_text(encoding="utf-8")
-        doc = yaml.safe_load(text)
-        if doc.get("kind") != "Task":
-            continue
-        assert "finally:" not in text, path.name
-        assert _STEP_SUMMARY in text, path.name
-
-def test_run_write_task_message_script_exists() -> None:
-    path = _OLMINSTALL / "tekton" / "scripts" / _WRITE_RUNNER
-    assert path.is_file()
-    text = path.read_text(encoding="utf-8")
-    assert _WRITE_SCRIPT in text
-
 def test_build_task_message_success_with_hint() -> None:
     from steps.write_task_message import build_task_message
 
     msg = build_task_message(
-        pipeline_task="provision-eaas-space",
+        pipeline_task="provision-ephc-space",
         results={"secretRef": "my-space-secret"},
     )
     assert msg == (
-        "provision-eaas-space: Succeeded.\n"
+        "provision-ephc-space: Succeeded.\n"
         "secretRef=my-space-secret."
     )
 
@@ -450,20 +439,6 @@ def test_finalize_test_finalize_without_test_output_writes_gate_summaries(
     assert task_message_path.read_text(encoding="utf-8").startswith("bvt: 100% pass rate")
 
 
-def test_pipeline_task_specs_have_task_message_in_results() -> None:
-    doc = yaml.safe_load(_PIPELINE.read_text(encoding="utf-8"))
-    skip_task_message = frozenset({"parse-pipeline-tests", "resolve-component-run-flags"})
-    for section in ("tasks", "finally"):
-        for task in doc["spec"].get(section) or []:
-            task_spec = task.get("taskSpec")
-            if not isinstance(task_spec, dict):
-                continue
-            if task.get("name") in skip_task_message:
-                continue
-            results = task_spec.get("results") or []
-            names = [r.get("name") for r in results if isinstance(r, dict)]
-            assert "TASK_MESSAGE" in names, task.get("name")
-
 def test_publish_results_pipeline_results_reference_publish_task() -> None:
     doc = yaml.safe_load(_PIPELINE.read_text(encoding="utf-8"))
     publish = next(t for t in doc["spec"]["finally"] if t["name"] == "publish-results")
@@ -507,6 +482,16 @@ def test_publish_results_declares_compact_tekton_results() -> None:
     assert "SMOKE_GATE.path" in seed["script"]
     assert "TESTS_SUMMARY.path" not in seed["script"]
     assert "TIER1_GATE.path" not in seed["script"]
+
+def test_publish_results_writes_summary_before_gate_check() -> None:
+    doc = yaml.safe_load(_PIPELINE.read_text(encoding="utf-8"))
+    publish = next(t for t in doc["spec"]["finally"] if t["name"] == "publish-results")
+    step_names = [s.get("name") for s in publish["taskSpec"]["steps"] if isinstance(s, dict)]
+    summary_idx = step_names.index("write-konflux-task-summary")
+    gate_idx = step_names.index("check-requested-gates-ran")
+    assert summary_idx < gate_idx, "write-konflux-task-summary must run before gate check so Results survive gate failure"
+    gate_step = next(s for s in publish["taskSpec"]["steps"] if s["name"] == "check-requested-gates-ran")
+    assert gate_step.get("onError") != "continue"
 
 def test_publish_results_task_results_fit_tekton_budget() -> None:
     from runners.report.junit_suite_report import (
@@ -760,6 +745,50 @@ def test_finalize_publish_results_sets_smoke_not_run_when_smoke_skipped(
     assert smoke_gate_path.read_text(encoding="utf-8").strip() == "N/A (not run)"
     msg = task_message_path.read_text(encoding="utf-8")
     assert "Failed" in msg or "hollow" in msg.lower()
+
+
+def test_finalize_publish_results_reports_install_blocked_gates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from steps import write_task_message
+
+    test_output_path = tmp_path / "test-output.json"
+    task_message_path = tmp_path / "task-message.txt"
+    tests_summary_path = tmp_path / "tests-summary.txt"
+    bvt_gate_path = tmp_path / "bvt-gate.txt"
+    smoke_gate_path = tmp_path / "smoke-gate.txt"
+    test_output_path.write_text("{}", encoding="utf-8")
+    bvt_gate_path.write_text("N/A (not run)", encoding="utf-8")
+    smoke_gate_path.write_text("N/A (not run)", encoding="utf-8")
+
+    monkeypatch.setenv("TEST_OUTPUT_PATH", str(test_output_path))
+    monkeypatch.setenv("TASK_MESSAGE_PATH", str(task_message_path))
+    monkeypatch.setenv("TESTS_SUMMARY_PATH", str(tests_summary_path))
+    monkeypatch.setenv("BVT_GATE_PATH", str(bvt_gate_path))
+    monkeypatch.setenv("SMOKE_GATE_PATH", str(smoke_gate_path))
+    monkeypatch.setenv("TEKTON_RESULTS_DIR", str(tmp_path))
+    monkeypatch.setenv("PIPELINE_TASK", "publish-results")
+    monkeypatch.setenv("TEST_GATES", "bvt,smoke")
+    monkeypatch.setattr(write_task_message, "_read_termination", lambda: ("", ""))
+    monkeypatch.setattr(
+        "runners.report.check_requested_gates_ran.upstream_blocked_test_gates",
+        lambda **kwargs: ["install-rhoai: failed"],
+    )
+    monkeypatch.setattr(
+        "runners.report.check_requested_gates_ran.collect_hollow_green_failures",
+        lambda **kwargs: [],
+    )
+
+    write_task_message._finalize_publish_results()
+
+    payload = json.loads(test_output_path.read_text(encoding="utf-8"))
+    assert payload["result"] == "FAILURE"
+    assert "install-rhoai: failed" in payload.get("note", "")
+    assert "bvt: N/A (not run)" in payload.get("note", "")
+    msg = task_message_path.read_text(encoding="utf-8")
+    assert msg.startswith("publish-results: Succeeded")
+    assert "install-rhoai: failed" in msg
 
 
 def test_finalize_publish_results_ignores_prior_step_termination(

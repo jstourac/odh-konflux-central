@@ -11,14 +11,14 @@ Env (required):
     DIAG_MANIFEST_RESULT -- Tekton result file path
 Env (optional):
     DIAG_DIR -- output directory (default /diag)
-    PRODUCT -- pipeline product (``existing`` skips OLM detail defaults)
+    PRODUCT -- pipeline product (test-only skips OLM detail defaults)
     INSTALL_OPERATOR_*_STATUS -- Tekton install task status
     INSTALL_DEP_OPERATORS_STATUS -- Tekton install-dep-operators task status
     PIPELINE_RUN_STATUS -- overall pipeline status (Failed enables adm inspect)
     PIPELINE_RUN_START_TIME -- optional RFC3339 hint; resolved from in-cluster PipelineRun when unset
     PIPELINE_RUN_NAME -- Tekton PipelineRun name (for in-cluster creationTimestamp lookup)
     DIAG_COLLECT_POD_LOGS -- default true (RHOAI triage pod logs)
-    DIAG_COLLECT_OLM_DETAIL -- default true when install ran (PRODUCT not ``existing``)
+    DIAG_COLLECT_OLM_DETAIL -- default true when install ran (PRODUCT is rhoai/odh)
     DIAG_COLLECT_ADM_INSPECT -- default true when install or pipeline Failed
     DIAG_POD_LOG_MAX_BYTES -- max bytes per namespace for workload logs (default 524288)
     DIAG_ISSUES_SUMMARY_MAX_LINES -- issues summary line cap (default 500)
@@ -83,7 +83,9 @@ def _truthy(raw: str | None, *, default: bool = False) -> bool:
 
 def _install_ran() -> bool:
     product = os.environ.get("PRODUCT", "").strip().lower()
-    return product not in ("", "existing")
+    from suite.constants import product_installs_operator
+
+    return product_installs_operator(product)
 
 
 def _install_task_failed() -> bool:

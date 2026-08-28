@@ -160,7 +160,11 @@ class ComponentCatalogRunnerTest(unittest.TestCase):
         comp = catalog.components["distributed_workloads"]
         assert comp.runner is not None
         self.assertIn("./kfto", comp.runner.phase_commands["smoke"])
-        self.assertIn("--junitfile-hide-skipped-tests", comp.runner.phase_commands["smoke"])
+        self.assertNotIn(
+            "--junitfile-hide-skipped-tests",
+            comp.runner.phase_commands["smoke"],
+        )
+        self.assertIn("--junitfile-hide-skipped-tests", comp.runner.phase_commands["tier1"])
 
     def test_spark_operator_has_platform_e2e_runner(self) -> None:
         catalog = load_components_smoke_catalog(default_components_smoke_config_path())

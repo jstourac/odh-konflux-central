@@ -30,6 +30,33 @@ class VerifyDashboardServesHtmlTest(unittest.TestCase):
         mock_curl.return_value = ("200", "text/html; charset=utf-8")
         self.assertTrue(verify_dashboard_serves_html("https://rh-ai.example/", timeout_sec=30))
 
+    @patch("components.dashboard_cypress.runtime.verify_dashboard_serves_html_in_cluster")
+    @patch("components.dashboard_cypress.runtime._is_ephc_cluster_source", return_value=True)
+    @patch("components.dashboard_cypress.runtime.time.sleep")
+    @patch("components.dashboard_cypress.runtime._curl_response_content_type")
+    def test_ephc_fallback_on_dns_failure(
+        self, mock_curl: MagicMock, _sleep: MagicMock, _ephc: MagicMock, mock_fallback: MagicMock
+    ) -> None:
+        # First attempt: DNS failure (code 000)
+        # Second attempt: Success (mock_fallback returns True)
+        mock_curl.return_value = ("000", "")
+        mock_fallback.return_value = True
+        self.assertTrue(verify_dashboard_serves_html("https://rh-ai.example/", timeout_sec=30))
+        mock_fallback.assert_called_once()
+
+    @patch("components.dashboard_cypress.runtime.verify_dashboard_serves_html_in_cluster")
+    @patch("components.dashboard_cypress.runtime._is_ephc_cluster_source", return_value=True)
+    @patch("components.dashboard_cypress.runtime.time.sleep")
+    @patch("components.dashboard_cypress.runtime._curl_response_content_type")
+    def test_ephc_fallback_on_dns_failure_with_error(
+        self, mock_curl: MagicMock, _sleep: MagicMock, _ephc: MagicMock, mock_fallback: MagicMock
+    ) -> None:
+        # Check that 000 with curl error message also triggers fallback
+        mock_curl.return_value = ("000 curl: (6) Could not resolve host", "")
+        mock_fallback.return_value = True
+        self.assertTrue(verify_dashboard_serves_html("https://rh-ai.example/", timeout_sec=30))
+        mock_fallback.assert_called_once()
+
     @patch("components.dashboard_cypress.runtime.time.sleep")
     @patch("components.dashboard_cypress.runtime.time.time", side_effect=[0, 0, 200])
     @patch("components.dashboard_cypress.runtime._curl_response_content_type")

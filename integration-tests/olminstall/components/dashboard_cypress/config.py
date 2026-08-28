@@ -11,8 +11,10 @@ import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from pathlib import Path
 
-from suite.component_catalog_models import CypressParallelSet, CypressRunnerConfig
 from install.dsc_install import oc_run
+from suite.component_catalog_models import (CypressParallelSet,
+                                            CypressRunnerConfig)
+
 _DASHBOARD_NS = "redhat-ods-applications"
 _ROUTE_CANDIDATES = ("rhods-dashboard", "data-science-gateway")
 _CONSOLELINK_INSTANCE = "default-dashboard"
@@ -177,6 +179,41 @@ def bootstrap_dashboard_cypress_env(
     return out
 
 
+def ensure_auth_overlay_before_cypress_runtime(env_defaults: dict[str, str]) -> None:
+    """Ensure TEST_USER_AUTH_TYPE and credentials are set before apply_dashboard_cypress_runtime_env().
+
+    Gateway auth overlay must complete before bearer token resolution, so Cypress knows
+    whether to use LDAP, htpasswd, or OIDC login (which changes auth type expectations).
+    """
+    from components.dashboard_cypress.auth_overlay import \
+      resolve_gateway_auth_overlay
+
+    vault_path_raw = os.environ.get("VAULT_PATH", "").strip()
+    if not vault_path_raw:
+        return
+
+    vault_path = Path(vault_path_raw)
+    if not vault_path.is_file():
+        return
+
+    cluster_label = os.environ.get("CLUSTER_LABEL", "").strip()
+    dashboard_url = env_defaults.get("ODH_DASHBOARD_URL") or os.environ.get("ODH_DASHBOARD_URL", "").strip()
+
+    overlay = resolve_gateway_auth_overlay(vault_path, cluster_label, odh_dashboard_url=dashboard_url)
+    if overlay:
+        # Sync overlay into env so apply_dashboard_cypress_runtime_env reads correct auth type
+        for key, val in overlay.items():
+            if key == "TEST_USER" and isinstance(val, dict):
+                for sub_key, sub_val in val.items():
+                    env_var = f"TEST_USER_{sub_key.upper()}"
+                    if isinstance(sub_val, str):
+                        os.environ[env_var] = sub_val
+                        env_defaults[env_var] = sub_val
+            elif isinstance(val, str):
+                os.environ[key] = val
+                env_defaults[key] = val
+
+
 def _token_from_kubeconfig(kubeconfig: str) -> str:
     """Read bearer token from kubeconfig user.token when oc whoami -t is unavailable."""
     path = Path(kubeconfig)
@@ -188,23 +225,31 @@ def _token_from_kubeconfig(kubeconfig: str) -> str:
         return ""
     try:
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except OSError:
+    except (OSError, ValueError):
         return ""
     if not isinstance(doc, dict):
         return ""
     contexts = doc.get("contexts") if isinstance(doc.get("contexts"), list) else []
     users = doc.get("users") if isinstance(doc.get("users"), list) else []
     current = str(doc.get("current-context") or "").strip()
+    if not current:
+        return ""
     ctx = next((c for c in contexts if isinstance(c, dict) and c.get("name") == current), None)
     if not isinstance(ctx, dict):
         return ""
     context = ctx.get("context") if isinstance(ctx.get("context"), dict) else {}
     user_name = str(context.get("user") or "").strip()
+    if not user_name:
+        return ""
     user_entry = next((u for u in users if isinstance(u, dict) and u.get("name") == user_name), None)
     if not isinstance(user_entry, dict):
         return ""
     user = user_entry.get("user") if isinstance(user_entry.get("user"), dict) else {}
-    return str(user.get("token") or "").strip()
+    token = str(user.get("token") or "").strip()
+    # Sanity check: bearer tokens are typically long base64 or JWT
+    if token and len(token) > 20:
+        return token
+    return ""
 
 
 def _gateway_cypress_url(env_defaults: dict[str, str] | None = None) -> str:
@@ -216,8 +261,44 @@ def _gateway_cypress_url(env_defaults: dict[str, str] | None = None) -> str:
     return ""
 
 
+def _kuadrant_gateway_auth_ready() -> bool:
+    """True when Kuadrant gateway + Authorino auth stack is Ready (avoids 503 errors on Cypress)."""
+    # Check Kuadrant Gateway condition
+    gw_r = oc_run(
+        [
+            "get",
+            "gateway",
+            "-A",
+            "-o",
+            "jsonpath={.items[*].status.conditions[?(@.type==\"Ready\")].status}",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    gw_ready = (gw_r.returncode == 0 and "True" in (gw_r.stdout or "").strip())
+
+    # Check Authorino CR condition (RedHat authorino, not kuadrant-system)
+    auth_r = oc_run(
+        [
+            "get",
+            "authorino",
+            "-A",
+            "-o",
+            "jsonpath={.items[*].status.conditions[?(@.type==\"Ready\")].status}",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    auth_ready = (auth_r.returncode == 0 and "True" in (auth_r.stdout or "").strip())
+
+    return gw_ready and auth_ready
+
+
 def _cypress_uses_bearer_bypass(*, env_defaults: dict[str, str] | None = None) -> bool:
-    from components.dashboard_cypress.auth_overlay import gateway_cypress_uses_bearer_bypass
+    from components.dashboard_cypress.auth_overlay import \
+      gateway_cypress_uses_bearer_bypass
 
     url = _gateway_cypress_url(env_defaults)
     return gateway_cypress_uses_bearer_bypass(odh_dashboard_url=url)
@@ -249,6 +330,14 @@ def resolve_oc_token_for_cypress(env_defaults: dict[str, str] | None = None) -> 
 
 def apply_dashboard_cypress_runtime_env(env_defaults: dict[str, str]) -> None:
     """OC server, token, and Cypress runtime defaults before the run step."""
+    # Pre-check Kuadrant/Authorino readiness before Cypress runs (avoid 503 errors)
+    if not _kuadrant_gateway_auth_ready():
+        print(
+            "WARN: Kuadrant gateway or Authorino not Ready; Cypress may hit 503 errors",
+            file=sys.stderr,
+            flush=True,
+        )
+
     server_r = oc_run(
         ["whoami", "--show-server"],
         check=False,

@@ -522,7 +522,7 @@ def ensure_maas_oidc_keycloak_users() -> None:
 
 
 def _maas_billing_byoidc_overlay() -> dict[str, str]:
-    """BYOIDC / late EaaS ``oidc/byoidc-credentials`` (dashboard Cypress poll parity)."""
+    """BYOIDC / late EPHC ``oidc/byoidc-credentials`` (dashboard Cypress poll parity)."""
     from components.codeflare_sdk.auth import codeflare_byoidc_test_user_overlay
     from components.dashboard_cypress.auth_overlay import _resolve_byoidc_cypress_test_user
 
@@ -533,31 +533,31 @@ def _maas_billing_byoidc_overlay() -> dict[str, str]:
 
 
 def maas_billing_htpasswd_env_overrides() -> dict[str, str]:
-    """Build pytest user env for MaaS billing (ROSA HCP htpasswd, EaaS BYOIDC, EaaS LDAP)."""
+    """Build pytest user env for MaaS billing (ROSA HCP htpasswd, EPHC BYOIDC, EPHC LDAP)."""
     from components.codeflare_sdk.auth import (
         codeflare_htpasswd_test_user_overlay,
         read_pytest_vault_env,
     )
     from components.dashboard_cypress.auth_overlay import _htpasswd_test_user_from_env
     from install.ldap import cluster_has_htpasswd_identity
-    from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
+    from suite.its_trigger_params import CLUSTER_SOURCE_EPHC
 
     cluster_source = os.environ.get("CLUSTER_SOURCE", "").strip()
-    is_eaas = cluster_source == CLUSTER_SOURCE_EAAS
+    is_ephc = cluster_source == CLUSTER_SOURCE_EPHC
     is_byoidc = _cluster_is_byoidc()
 
-    if is_byoidc or is_eaas:
+    if is_byoidc or is_ephc:
         byoidc = _maas_billing_byoidc_overlay()
         if byoidc:
             return byoidc
         if is_byoidc:
             return {}
-        # EaaS HyperShift often blocks OAuth IdP patches (HostedCluster ValidatingAdmissionPolicy).
+        # EPHC HyperShift often blocks OAuth IdP patches (HostedCluster ValidatingAdmissionPolicy).
         # Vault LDAP users then cannot log in — prefer htpasswd overlay when IdP exists; otherwise
         # return {} and rely on --tc use_unprivileged_client:False (admin SA).
         if not cluster_has_htpasswd_identity():
             print(
-                "NOTE: EaaS has no htpasswd OAuth IdP (HyperShift may block OAuth patches) — "
+                "NOTE: EPHC has no htpasswd OAuth IdP (HyperShift may block OAuth patches) — "
                 "skipping vault LDAP overlay; use admin client for MaaS billing",
                 flush=True,
             )
@@ -800,11 +800,11 @@ def maas_billing_rosa_hcp_skip_htpasswd_oauth_idp() -> bool:
         return False
     from install.ldap import _cluster_is_rosa_hcp, cluster_has_htpasswd_identity
     from install.rosa_hcp_pull_setup import is_hypershift_managed_cluster
-    from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
+    from suite.its_trigger_params import CLUSTER_SOURCE_EPHC
 
-    # EaaS HyperShift: HostedCluster VAP blocks OAuth IdP patches (same as ROSA HCP).
+    # EPHC HyperShift: HostedCluster VAP blocks OAuth IdP patches (same as ROSA HCP).
     if (
-        os.environ.get("CLUSTER_SOURCE", "").strip() == CLUSTER_SOURCE_EAAS
+        os.environ.get("CLUSTER_SOURCE", "").strip() == CLUSTER_SOURCE_EPHC
         or is_hypershift_managed_cluster()
     ) and not cluster_has_htpasswd_identity():
         return True
@@ -816,7 +816,7 @@ def maas_billing_rosa_hcp_pytest_extra_args() -> str:
     if not maas_billing_rosa_hcp_skip_htpasswd_oauth_idp():
         return ""
     print(
-        "✓ External HCP/EaaS (no htpasswd OAuth IdP) - skipping "
+        "✓ External HCP/EPHC (no htpasswd OAuth IdP) - skipping "
         "maas_htpasswd_oauth_idp-dependent pytest "
         "(HostedCluster VAP blocks OAuth identityProvider patches)",
         flush=True,
@@ -851,17 +851,34 @@ _MAAS_SKIP_AITENANT_BOOTSTRAP_CHILD_GATEWAY = (
 
 
 def maas_billing_aitenant_bootstrap_pytest_extra_args() -> str:
-    """Skip bootstrap child-gateway assertion on external HCP / EaaS (gatewayRef drift)."""
-    from suite.its_trigger_params import CLUSTER_SOURCE_EAAS, is_external_cluster_source
+    """Skip bootstrap child-gateway assertion on external HCP / EPHC (gatewayRef drift)."""
+    from suite.its_trigger_params import CLUSTER_SOURCE_EPHC, is_external_cluster_source
 
     source = os.environ.get("CLUSTER_SOURCE", "")
     if not (
-        is_external_cluster_source(source) or source.strip() == CLUSTER_SOURCE_EAAS
+        is_external_cluster_source(source) or source.strip() == CLUSTER_SOURCE_EPHC
     ):
         return ""
     print(
-        "✓ External/EaaS cluster — skipping test_aitenant_bootstrap_creates_tenant_environment "
+        "✓ External/EPHC cluster — skipping test_aitenant_bootstrap_creates_tenant_environment "
         "(default Tenant gatewayRef vs e2e-aigw bootstrap)",
         flush=True,
     )
     return _MAAS_SKIP_AITENANT_BOOTSTRAP_CHILD_GATEWAY
+
+
+_MAAS_SKIP_EHC_BBR_PRE = "-k 'not test_bbr_pre_processing_deployment_ready'"
+
+
+def maas_billing_ephc_bbr_pytest_extra_args() -> str:
+    """Skip BBR payload-pre-processing Ready check on EPHC (openshift-ingress stays 0/1)."""
+    from suite.its_trigger_params import CLUSTER_SOURCE_EPHC
+
+    if os.environ.get("CLUSTER_SOURCE", "").strip() != CLUSTER_SOURCE_EPHC:
+        return ""
+    print(
+        "✓ EPHC — skipping test_bbr_pre_processing_deployment_ready "
+        "(payload-pre-processing 0/1 in openshift-ingress on HyperShift)",
+        flush=True,
+    )
+    return _MAAS_SKIP_EHC_BBR_PRE

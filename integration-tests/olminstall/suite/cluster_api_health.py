@@ -1,4 +1,4 @@
-"""Detect unreachable cluster API (EaaS lease DNS death, etc.) for fail-fast infra attribution."""
+"""Detect unreachable cluster API (EPHC lease DNS death, etc.) for fail-fast infra attribution."""
 
 from __future__ import annotations
 
@@ -7,9 +7,17 @@ import socket
 from urllib.parse import urlparse
 
 from install.dsc_install import _discover_operator_admission_webhook_service, oc_run
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
+from suite.its_trigger_params import CLUSTER_SOURCE_EPHC, is_ephemeral_hosted_cluster_source
 
 _INFRA_PREFIX = "cluster API unreachable"
+_CONSOLE_INFRA_PREFIX = "openshift console route unreachable"
+
+# OpenShift CI provision-ephemeral-cluster guests (konflux-ocp-ci.dev). Console/apps
+# hostnames often do not resolve from Konflux Tekton pods while the API server is healthy.
+_OPENSHIFT_CI_EPHEMERAL_API_MARKERS: tuple[str, ...] = (
+    "konflux-ocp-ci.dev",
+    ".prod.konflux-ocp-ci.",
+)
 
 _UNREACHABLE_MARKERS: tuple[str, ...] = (
     "no such host",
@@ -42,6 +50,14 @@ def cluster_api_unreachable_text(*, stderr: str = "", stdout: str = "") -> str:
                     return f"{_INFRA_PREFIX}: {snippet}"
             return f"{_INFRA_PREFIX}: {marker}"
     return ""
+
+
+def _oci_guest_apps_hostname(hostname: str) -> bool:
+    """True for OpenShift CI guest routes (*.apps.*.konflux-ocp-ci.dev)."""
+    host = (hostname or "").strip().lower().rstrip(".")
+    if not host:
+        return False
+    return any(marker in host for marker in _OPENSHIFT_CI_EPHEMERAL_API_MARKERS)
 
 
 def cluster_api_unreachable_reason(*, probe: bool = True) -> str:
@@ -118,19 +134,16 @@ def _console_hostname_unreachable_reason(hostname: str) -> str:
     """Return infra reason when the console route hostname does not resolve."""
     host = (hostname or "").strip().rstrip(".")
     if not host:
-        return f"{_INFRA_PREFIX}: openshift console unavailable: empty hostname"
+        return f"{_CONSOLE_INFRA_PREFIX}: empty hostname"
     try:
         socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     except OSError as exc:
-        msg = cluster_api_unreachable_text(stderr=str(exc))
-        if msg:
-            return msg
-        return f"{_INFRA_PREFIX}: openshift console unavailable: {exc}"
+        return f"{_CONSOLE_INFRA_PREFIX}: {exc}"
     return ""
 
 
 def openshift_console_route_unavailable_reason(*, probe: bool = True) -> str:
-    """Return infra reason when the cluster console route hostname is unreachable (EaaS lease DNS)."""
+    """Return infra reason when the cluster console route hostname is unreachable (EPHC lease DNS)."""
     if not probe:
         return ""
     try:
@@ -141,29 +154,84 @@ def openshift_console_route_unavailable_reason(*, probe: bool = True) -> str:
             timeout=15,
         )
     except Exception as exc:
-        return cluster_api_unreachable_text(stderr=str(exc)) or f"{_INFRA_PREFIX}: {exc}"
+        msg = cluster_api_unreachable_text(stderr=str(exc))
+        if msg:
+            return f"{_CONSOLE_INFRA_PREFIX}: {exc}"
+        return f"{_CONSOLE_INFRA_PREFIX}: {exc}"
     msg = cluster_api_unreachable_text(
         stderr=result.stderr or "",
         stdout=result.stdout or "",
     )
     if msg:
-        return msg
+        snippet = (result.stderr or result.stdout or "").strip()[:240]
+        return f"{_CONSOLE_INFRA_PREFIX}: {snippet}" if snippet else msg
     if result.returncode != 0:
         snippet = (result.stderr or result.stdout or "").strip()[:240]
         if snippet:
-            return f"{_INFRA_PREFIX}: openshift console unavailable: {snippet}"
+            return f"{_CONSOLE_INFRA_PREFIX}: {snippet}"
         return ""
     console_url = (result.stdout or "").strip()
     if not console_url:
         return ""
     host = urlparse(console_url).hostname or ""
+    if _oci_guest_apps_hostname(host):
+        # Tekton pods often cannot resolve guest apps routes; verify uses in-cluster curl.
+        return ""
     return _console_hostname_unreachable_reason(host)
 
 
-def _extended_eaas_infra_probes_enabled() -> bool:
-    """Webhook/console probes run on EaaS Tekton steps (not local unit tests)."""
+def _rh_ai_route_hostname() -> str:
+    apps_ns = (os.environ.get("APPLICATIONS_NAMESPACE") or "redhat-ods-applications").strip()
+    try:
+        result = oc_run(
+            [
+                "get",
+                "route",
+                "rh-ai",
+                "-n",
+                apps_ns,
+                "-o",
+                "jsonpath={.spec.host}",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def openshift_guest_rh_ai_route_tekton_unreachable_reason(*, probe: bool = True) -> str:
+    """When the cluster is an OCI guest, rh-ai.apps routes often fail DNS from Tekton (Playwright, MLflow)."""
+    if not probe or not _extended_ephc_infra_probes_enabled():
+        return ""
+    try:
+        result = oc_run(
+            ["whoami", "--show-console"],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    console_host = urlparse((result.stdout or "").strip()).hostname or ""
+    if not _oci_guest_apps_hostname(console_host):
+        return ""
+    rh_ai_host = _rh_ai_route_hostname()
+    if not rh_ai_host or not _oci_guest_apps_hostname(rh_ai_host):
+        return ""
+    return _console_hostname_unreachable_reason(rh_ai_host)
+
+
+def _extended_ephc_infra_probes_enabled() -> bool:
+    """Webhook/console probes run on EPHC Tekton steps (not local unit tests)."""
     source = os.environ.get("CLUSTER_SOURCE", "").strip()
-    if source not in ("", CLUSTER_SOURCE_EAAS):
+    if not is_ephemeral_hosted_cluster_source(source):
         return False
     in_pipeline = bool(
         os.environ.get("PIPELINE_RUN_NAME", "").strip()
@@ -172,20 +240,37 @@ def _extended_eaas_infra_probes_enabled() -> bool:
     return in_pipeline and bool(os.environ.get("KUBECONFIG", "").strip())
 
 
+def _prior_cluster_api_unreachable_reason() -> str:
+    from steps.cluster_prep_state import cluster_api_unreachable_marker_reason
+
+    return cluster_api_unreachable_marker_reason()
+
+
+def _persist_cluster_api_unreachable(reason: str) -> None:
+    if not reason.lower().startswith(_INFRA_PREFIX.lower()):
+        return
+    from steps.cluster_prep_state import mark_cluster_api_unreachable
+
+    mark_cluster_api_unreachable(reason)
+
+
 def cluster_smoke_infra_blocked_reason(*, probe: bool = True) -> str:
-    """Combined infra probe: API, operator webhook, and console route (EaaS lease death)."""
+    """Combined infra probe: API, operator webhook, and console route (EPHC lease death)."""
+    prior = _prior_cluster_api_unreachable_reason()
+    if prior:
+        return prior
     reason = cluster_api_unreachable_reason(probe=probe)
     if reason:
+        _persist_cluster_api_unreachable(reason)
         return reason
-    if not probe or not _extended_eaas_infra_probes_enabled():
+    if not probe or not _extended_ephc_infra_probes_enabled():
         return ""
-    for check in (
-        operator_admission_webhook_unavailable_reason,
-        openshift_console_route_unavailable_reason,
-    ):
-        reason = check(probe=probe)
-        if reason:
-            return reason
+    reason = operator_admission_webhook_unavailable_reason(probe=probe)
+    if reason:
+        return reason
+    reason = openshift_console_route_unavailable_reason(probe=probe)
+    if reason:
+        return reason
     return ""
 
 
@@ -206,6 +291,7 @@ def is_definitive_infra_error(message: str) -> bool:
         "kuadrant/authorino dependency operators are missing",
         "webhook has no endpoints",
         "openshift console unavailable",
+        "openshift console route unreachable",
         "broken hypershift admission webhook",
         "xxx-invalid-service-xxx",
         "block-resources.hypershift.openshift.io",

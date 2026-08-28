@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ from components.maas_billing.auth import (  # noqa: E402
     ensure_maas_auth_policy_ready,
     ensure_maas_authorino_ready,
 )
+from components.maas_billing.gateway import ensure_maas_api_auth_policy  # noqa: E402
 
 class MaasGatewayYamlTest(unittest.TestCase):
     def test_includes_authorino_tls_bootstrap_annotation(self) -> None:
@@ -91,20 +93,80 @@ class MaasAuthGatewayReadyTest(unittest.TestCase):
 
         def fake_oc_run(args, **kwargs):
             calls.append(list(args))
-            if args[:2] == ["get", "authpolicy"]:
+            if args[:2] == ["get", "authpolicy"] and "Accepted" in (args[-1] if args else ""):
                 return MagicMock(returncode=0, stdout="False")
             if args[:3] == ["get", "kuadrant", "kuadrant"]:
                 return MagicMock(returncode=0, stdout="False\tMissingDependency")
             return MagicMock(returncode=0, stdout="")
 
-        with patch("components.maas_billing.auth._oc_run", side_effect=fake_oc_run):
-            with patch("components.maas_billing.auth._sleep"):
-                with self.assertRaises(RuntimeError):
-                    _wait_maas_api_auth_policy_accepted(timeout_sec=1)
+        with patch("components.maas_billing.gateway.ensure_maas_api_auth_policy"):
+            with patch("components.maas_billing.auth._oc_run", side_effect=fake_oc_run):
+                with patch("components.maas_billing.auth._sleep"):
+                    with self.assertRaises(RuntimeError):
+                        _wait_maas_api_auth_policy_accepted(timeout_sec=1)
 
         delete_calls = [c for c in calls if c[:2] == ["delete", "pod"]]
         self.assertGreaterEqual(len(delete_calls), 1)
         self.assertIn("control-plane=controller-manager", delete_calls[0])
+
+    def test_wait_proceeds_on_functional_readiness_after_grace(self) -> None:
+        with patch.dict(os.environ, {"MAAS_AUTH_POLICY_ACCEPT_GRACE_SEC": "0"}):
+            with patch("components.maas_billing.auth._maas_auth_policy_accepted", return_value=False):
+                with patch(
+                    "components.maas_billing.auth._maas_auth_policy_functionally_ready",
+                    return_value=True,
+                ):
+                    with patch(
+                        "components.maas_billing.auth._kuadrant_ready_status",
+                        return_value=("True", ""),
+                    ):
+                        with patch("components.maas_billing.gateway.ensure_maas_api_auth_policy"):
+                            with patch(
+                                "components.maas_billing.auth._maas_api_deployment_ready_now",
+                                return_value=False,
+                            ):
+                                with patch("components.maas_billing.auth._sleep"):
+                                    _wait_maas_api_auth_policy_accepted(timeout_sec=5)
+
+    @patch("components.maas_billing.gateway.oc_run")
+    @patch("components.maas_billing.gateway._clone_models_as_a_service")
+    @patch(
+        "components.maas_billing.gateway.maas_api_auth_validate_url",
+        return_value="https://maas-api.redhat-ai-gateway-infra.svc.cluster.local:8443/internal/v1/api-keys/validate",
+    )
+    def test_ensure_maas_api_auth_policy_replaces_stale_callback(
+        self,
+        _validate_url,
+        clone_repo,
+        oc_run,
+    ) -> None:
+        stale = "https://maas-api.redhat-ods-applications.svc.cluster.local:8443/internal/v1/api-keys/validate"
+        expected = "https://maas-api.redhat-ai-gateway-infra.svc.cluster.local:8443/internal/v1/api-keys/validate"
+        policy_path_calls = {"n": 0}
+
+        def side_effect(args, **kwargs):
+            if args[:2] == ["delete", "authpolicy"] and args[3] == "-n":
+                return MagicMock(returncode=0, stdout="")
+            if args[:2] == ["get", "authpolicy"]:
+                policy_path_calls["n"] += 1
+                url = stale if policy_path_calls["n"] == 1 else expected
+                return MagicMock(returncode=0, stdout=url)
+            if args[:2] == ["apply", "-n"]:
+                return MagicMock(returncode=0, stdout="")
+            return MagicMock(returncode=0, stdout="")
+
+        oc_run.side_effect = side_effect
+        repo = MagicMock()
+        repo.__truediv__ = lambda self, other: MagicMock(
+            is_file=lambda: True,
+            read_text=lambda encoding: (
+                "https://maas-api.placehold.svc.cluster.local:8443/internal/v1/api-keys/validate"
+            ),
+        )
+        clone_repo.return_value = repo
+        ensure_maas_api_auth_policy()
+        delete_calls = [c for c in [list(call.args[0]) for call in oc_run.call_args_list] if c[:2] == ["delete", "authpolicy"]]
+        self.assertTrue(any(c[2] == "maas-api-auth-policy" for c in delete_calls))
 
     @patch("components.maas_billing.auth._restart_maas_auth_workloads")
     @patch("components.maas_billing.auth._wait_maas_api_auth_policy_accepted")

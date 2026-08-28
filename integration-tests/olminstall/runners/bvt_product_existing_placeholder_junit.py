@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit skipped JUnit XML for PRODUCT=existing BVT (no workload cluster / no ODH APIs on worker)."""
+"""Emit skipped JUnit XML for test-only BVT (no workload cluster / no ODH APIs on worker)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 _SKIP = (
-    "PRODUCT=existing: full opendatahub-tests BVT needs a cluster with Open Data Hub APIs "
-    "(e.g. DataScienceCluster). Use --external-kubeconfig or PRODUCT rhoai/odh for EaaS-backed BVT."
+    "test-only PRODUCT: full opendatahub-tests BVT needs a cluster with Open Data Hub APIs "
+    "(e.g. DataScienceCluster). Use --external-kubeconfig or PRODUCT rhoai/odh for EPHC-backed BVT."
 )
 
 _ARTIFACTS_ROOT = Path("/artifacts").resolve()

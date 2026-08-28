@@ -52,7 +52,7 @@ def _clone_ods_install() -> Path:
 
 
 def _byoidc_credentials_ready() -> bool:
-    """EaaS BYOIDC clusters expose test users via ``oidc/byoidc-credentials`` (g7j2k)."""
+    """EPHC BYOIDC clusters expose test users via ``oidc/byoidc-credentials`` (g7j2k)."""
     r = oc_run(
         ["get", "secret", "byoidc-credentials", "-n", "oidc"],
         check=False,

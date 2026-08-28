@@ -147,7 +147,7 @@ def reconcile_kuadrant_operator_groups() -> None:
     setup-dependencies.sh (odh-gitops) creates OperatorGroup/kuadrant. Multiple groups
     in the same namespace block OLM InstallPlans on pooled QE clusters.
 
-    On fresh EaaS the manifest apply strips OperatorGroup; without one OLM never
+    On fresh EPHC the manifest apply strips OperatorGroup; without one OLM never
     creates an InstallPlan and currentCSV stays unset.
     """
     names = _operatorgroup_names()
@@ -518,7 +518,7 @@ def _ensure_kuadrant_namespace_ready() -> None:
 
 
 def _apply_rhcl_manifest(target_csv: str, *, olm_dir: Path | None = None) -> None:
-    olm_dir = olm_dir or resolve_olminstall_dir(require_post_install_script=False)
+    olm_dir = olm_dir or resolve_olminstall_dir(require_marker=False)
     _ensure_kuadrant_namespace_ready()
     _ensure_kuadrant_namespace_exists()
     reconcile_kuadrant_operator_groups()
@@ -670,7 +670,7 @@ def ensure_rhcl_operator_for_maas(*, olm_dir: Path | None = None) -> None:
         else:
             _apply_rhcl_manifest(target_csv)
     else:
-        root = olm_dir or resolve_olminstall_dir(require_post_install_script=False)
+        root = olm_dir or resolve_olminstall_dir(require_marker=False)
         _reconcile_stuck_rhcl_subscription(target_csv, olm_dir=root)
 
     approved = approve_pending_installplans(_RHCL_NS)
@@ -694,7 +694,21 @@ def run_post_install_rhcl_operator(
     timeout_sec: int | None = None,
 ) -> bool:
     """Run olminstall post-install-rhcl-operator.sh (Kuadrant wait + Authorino TLS)."""
-    root = olm_dir or resolve_olminstall_dir()
+    try:
+        root = olm_dir or resolve_olminstall_dir()
+    except (FileNotFoundError, RuntimeError) as exc:
+        msg = str(exc)
+        if fatal:
+            raise RuntimeError(msg) from exc
+        print(f"WARN: {msg}; skipping post-install-rhcl", file=sys.stderr, flush=True)
+        return False
+    except SystemExit as exc:
+        code = getattr(exc, "code", 1)
+        msg = f"olminstall checkout failed (exit {code})"
+        if fatal:
+            raise RuntimeError(msg) from exc
+        print(f"WARN: {msg}; skipping post-install-rhcl", file=sys.stderr, flush=True)
+        return False
     script = root / "resources" / "post-install-rhcl-operator.sh"
     print(f"Running {script.name} for Kuadrant/Authorino readiness...", flush=True)
     if timeout_sec is not None:
@@ -769,9 +783,19 @@ def _clear_maas_gateway_stack_marker() -> None:
 
 def ensure_maas_rhcl_dependency_stack(*, olm_dir: Path | None = None) -> None:
     """Pin RHCL CSV and run post-install script (install-dep-operators happy path)."""
+    from components.maas_billing.gateway import wait_openshift_default_gateway_class_accepted
     from install.dependency_operators import authorino_deferred_to_component_prep
 
     ensure_rhcl_operator_for_maas(olm_dir=olm_dir)
+    # EPHC/HyperShift: GatewayClass may not exist until ingress gateway controller starts.
+    # post-install-rhcl needs Accepted=True to avoid Kuadrant MissingDependency stuck state.
+    if not wait_openshift_default_gateway_class_accepted():
+        print(
+            "WARN: openshift-default GatewayClass not Accepted before post-install-rhcl; "
+            "Kuadrant may stay MissingDependency",
+            file=sys.stderr,
+            flush=True,
+        )
     defer_authorino = authorino_deferred_to_component_prep()
     post_kwargs: dict[str, object] = {"fatal": not defer_authorino}
     if olm_dir is not None:
@@ -821,7 +845,9 @@ def ensure_maas_rhcl_dependency_stack(*, olm_dir: Path | None = None) -> None:
         # post-install often races GatewayClass; restart Kuadrant once provider exists.
         try:
             from components.maas_billing.auth import recover_kuadrant_after_gateway_api_provider
+            from components.maas_billing.gateway import ensure_openshift_default_gateway_class
 
+            ensure_openshift_default_gateway_class()
             if recover_kuadrant_after_gateway_api_provider():
                 _clear_maas_gateway_stack_marker()
                 print(

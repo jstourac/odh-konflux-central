@@ -20,11 +20,73 @@ from components.maas_billing.common import (
     _KUADRANT_OPERATOR_LABELS,
     _MAAS_APPS_NS,
     _MAAS_AUTH_POLICY,
+    maas_api_auth_validate_url,
+    maas_api_namespace,
+    _MAAS_API_NS_CANDIDATES,
 )
 
 
 def _oc_run(*args, **kwargs):
     return oc_run(*args, **kwargs)
+
+
+def _maas_api_validate_url() -> str:
+    return maas_api_auth_validate_url()
+
+
+def _current_maas_api_auth_policy_url() -> str:
+    r = _oc_run(
+        [
+            "get",
+            "authpolicy",
+            _MAAS_AUTH_POLICY,
+            "-n",
+            _MAAS_APPS_NS,
+            "-o",
+            "jsonpath={.spec.rules.metadata.apiKeyValidation.http.url}",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def _maas_api_deployment_ready_now() -> bool:
+    for ns in _MAAS_API_NS_CANDIDATES:
+        r = _oc_run(
+            [
+                "get",
+                "deployment",
+                "maas-api",
+                "-n",
+                ns,
+                "-o",
+                "jsonpath={.status.readyReplicas}",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        if r.returncode == 0:
+            try:
+                if int((r.stdout or "0").strip() or "0") >= 1:
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
+def _maas_auth_policy_functionally_ready(kuadrant_ns: str) -> bool:
+    """Pooled clusters may lag Accepted while callback URL and workloads are healthy."""
+    if _current_maas_api_auth_policy_url() != _maas_api_validate_url():
+        return False
+    if not _maas_api_deployment_ready_now():
+        return False
+    ready_status, _ = _kuadrant_ready_status(kuadrant_ns)
+    return ready_status == "True"
 
 
 def _sleep(seconds: float) -> None:
@@ -120,8 +182,6 @@ def _authorino_tls_configured(namespace: str) -> bool:
 
 def authorino_workload_tls_ready() -> bool:
     """True when Authorino CR, deployment, service, and listener TLS are ready."""
-    from install.dependency_operators import _authorino_cr_exists
-
     if not _authorino_cr_exists():
         return False
     ns = _authorino_namespace()
@@ -265,31 +325,60 @@ def recover_kuadrant_after_gateway_api_provider(*, timeout_sec: int | None = Non
         )
         return False
 
-    raw_timeout = os.environ.get("KUADRANT_GATEWAY_PROVIDER_RECOVER_TIMEOUT_SEC", "").strip()
     if timeout_sec is not None:
         wait_sec = timeout_sec
-    elif raw_timeout:
+    else:
+        raw_timeout = os.environ.get("KUADRANT_GATEWAY_PROVIDER_RECOVER_TIMEOUT_SEC", "").strip()
         try:
-            wait_sec = int(raw_timeout)
+            wait_sec = int(raw_timeout) if raw_timeout else 300
         except ValueError:
             wait_sec = 300
-    else:
-        wait_sec = 300
 
+    deadline = time.time() + wait_sec
+
+    if reason == "MissingDependency":
+        post_timeout = min(120, max(0, int(deadline - time.time())))
+        if post_timeout > 0:
+            print(
+                f"Kuadrant MissingDependency with GatewayClass present — "
+                f"running post-install-rhcl-operator.sh ({post_timeout}s)...",
+                flush=True,
+            )
+            if run_post_install_rhcl_operator(fatal=False, timeout_sec=post_timeout):
+                if kuadrant_cr_ready():
+                    clear_gateway_stack_incomplete_marker()
+                    print("✓ Kuadrant Ready after post-install-rhcl-operator.sh", flush=True)
+                    return True
+
+    remaining = max(0, int(deadline - time.time()))
     print(
         f"Kuadrant Ready={status or '?'} reason={reason or '?'} with GatewayClass present — "
-        f"restarting Kuadrant operator pods in {ns} (up to {wait_sec}s)...",
+        f"restarting Kuadrant operator pods in {ns} (up to {remaining}s)...",
         flush=True,
     )
     _restart_kuadrant_operator_pods(ns)
-    deadline = time.time() + wait_sec
+    stuck_cap = int(os.environ.get("KUADRANT_MISSING_DEPENDENCY_GIVE_UP_SEC", "60"))
+    missing_since: float | None = None
     while time.time() < deadline:
         if kuadrant_cr_ready():
             clear_gateway_stack_incomplete_marker()
             print("✓ Kuadrant Ready after Gateway API provider recovery restart", flush=True)
             return True
+        st, rs = _kuadrant_ready_status(ns)
+        if rs == "MissingDependency":
+            if missing_since is None:
+                missing_since = time.time()
+            elif time.time() - missing_since >= stuck_cap:
+                print(
+                    f"WARN: Kuadrant still MissingDependency after {stuck_cap}s "
+                    f"(status={st or '?'}); giving up pod-restart recovery",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+        else:
+            missing_since = None
         if int(time.time()) % 20 < 12:
-            st, rs = _kuadrant_ready_status(ns)
             print(
                 f"Waiting for Kuadrant Ready after operator restart "
                 f"(status={st or '?'}, reason={rs or '?'})...",
@@ -344,13 +433,24 @@ def _maas_auth_policy_accepted() -> bool:
 
 
 def _wait_maas_api_auth_policy_accepted(*, timeout_sec: int) -> None:
+    from components.maas_billing.gateway import ensure_maas_api_auth_policy
+
     kuadrant_ns = _kuadrant_namespace()
     deadline = time.time() + timeout_sec
     restarted_operator = False
+    restarted_workloads = False
+    last_policy_nudge = 0.0
+    functional_since: float | None = None
+    grace_sec = int(os.environ.get("MAAS_AUTH_POLICY_ACCEPT_GRACE_SEC", "120"))
     while time.time() < deadline:
         if _maas_auth_policy_accepted():
             print(f"✓ MaaS API AuthPolicy {_MAAS_APPS_NS}/{_MAAS_AUTH_POLICY} Accepted", flush=True)
             return
+
+        now = time.time()
+        if now - last_policy_nudge >= 60:
+            ensure_maas_api_auth_policy()
+            last_policy_nudge = now
 
         ready_status, ready_reason = _kuadrant_ready_status(kuadrant_ns)
         if ready_reason == "MissingDependency" or ready_status != "True":
@@ -364,6 +464,30 @@ def _wait_maas_api_auth_policy_accepted(*, timeout_sec: int) -> None:
                 restarted_operator = True
                 _sleep(20)
                 continue
+        elif not restarted_workloads and _maas_api_deployment_ready_now():
+            authorino_ns = _authorino_namespace()
+            print(
+                "Kuadrant Ready but AuthPolicy not Accepted — restarting authorino and maas-api...",
+                flush=True,
+            )
+            _restart_maas_auth_workloads(authorino_ns)
+            restarted_workloads = True
+            _sleep(20)
+            continue
+
+        if _maas_auth_policy_functionally_ready(kuadrant_ns):
+            if functional_since is None:
+                functional_since = now
+            elif now - functional_since >= grace_sec:
+                print(
+                    f"WARN: {_MAAS_AUTH_POLICY} Accepted=False after {grace_sec}s but "
+                    f"callback URL and maas-api are ready — proceeding (Kuadrant Ready=True)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+        else:
+            functional_since = None
 
         if int(time.time()) % 30 < 12:
             print(
@@ -372,6 +496,15 @@ def _wait_maas_api_auth_policy_accepted(*, timeout_sec: int) -> None:
                 flush=True,
             )
         _sleep(10)
+
+    if _maas_auth_policy_functionally_ready(kuadrant_ns):
+        print(
+            f"WARN: {_MAAS_AUTH_POLICY} not Accepted after {timeout_sec}s but "
+            "callback URL and maas-api are ready — proceeding",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
 
     raise RuntimeError(
         f"MaaS API AuthPolicy {_MAAS_APPS_NS}/{_MAAS_AUTH_POLICY} not Accepted after {timeout_sec}s "
@@ -405,7 +538,7 @@ def _rollout_restart_deployment(namespace: str, name: str, *, timeout_sec: int =
 def _restart_maas_auth_workloads(authorino_ns: str) -> None:
     """Pick up Authorino TLS and AuthPolicy changes (models-as-a-service deploy.sh parity)."""
     _rollout_restart_deployment(authorino_ns, "authorino")
-    _rollout_restart_deployment(_MAAS_APPS_NS, "maas-api")
+    _rollout_restart_deployment(maas_api_namespace(), "maas-api")
     print("✓ Restarted authorino and maas-api deployments after auth gateway setup", flush=True)
 
 
@@ -413,32 +546,33 @@ def _wait_maas_api_deployment_ready(*, timeout_sec: int) -> None:
     """Wait until maas-api exists so AuthPolicy validation URL can resolve."""
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        r = _oc_run(
-            [
-                "get",
-                "deployment",
-                "maas-api",
-                "-n",
-                _MAAS_APPS_NS,
-                "-o",
-                "jsonpath={.status.readyReplicas}",
-            ],
-            check=False,
-            capture_output=True,
-            timeout=30,
-        )
-        if r.returncode == 0:
-            try:
-                if int((r.stdout or "0").strip() or "0") >= 1:
-                    print(f"✓ maas-api deployment ready in {_MAAS_APPS_NS}", flush=True)
-                    return
-            except ValueError:
-                pass
+        for ns in _MAAS_API_NS_CANDIDATES:
+            r = _oc_run(
+                [
+                    "get",
+                    "deployment",
+                    "maas-api",
+                    "-n",
+                    ns,
+                    "-o",
+                    "jsonpath={.status.readyReplicas}",
+                ],
+                check=False,
+                capture_output=True,
+                timeout=30,
+            )
+            if r.returncode == 0:
+                try:
+                    if int((r.stdout or "0").strip() or "0") >= 1:
+                        print(f"✓ maas-api deployment ready in {ns}", flush=True)
+                        return
+                except ValueError:
+                    pass
         if int(time.time()) % 30 < 12:
-            print(f"Waiting for maas-api deployment in {_MAAS_APPS_NS}...", flush=True)
+            print("Waiting for maas-api deployment...", flush=True)
         _sleep(10)
 
-    raise RuntimeError(f"maas-api deployment not ready in {_MAAS_APPS_NS} after {timeout_sec}s")
+    raise RuntimeError(f"maas-api deployment not ready after {timeout_sec}s")
 
 
 def ensure_maas_authorino_ready() -> str:

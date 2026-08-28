@@ -74,7 +74,7 @@ class ConformaGateTest(unittest.TestCase):
         )
         self.assertFalse(
             should_wait_for_conforma(
-                wait_for_conforma="true", product="existing", snapshot_name="snap-1"
+                wait_for_conforma="true", product="", snapshot_name="snap-1"
             )
         )
         self.assertTrue(
@@ -180,7 +180,7 @@ class DecideConformaGateWithoutWaitTest(unittest.TestCase):
     def test_explicit_bypass_existing_product(self) -> None:
         decision = decide_conforma_gate_without_wait(
             wait_for_conforma="true",
-            product="existing",
+            product="",
             snapshot_name="",
         )
         self.assertEqual(decision.gate, CONFORMA_GATE_PASS)

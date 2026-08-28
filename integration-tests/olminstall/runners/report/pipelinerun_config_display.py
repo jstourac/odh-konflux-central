@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS, external_kubeconfig_secret_name, is_external_cluster_source
+from suite.its_trigger_params import CLUSTER_SOURCE_EPHC, external_kubeconfig_secret_name, is_external_cluster_source
 
 # Tekton param name → summary label (order preserved; Konflux → cluster → product → tests).
 _PARAM_LABELS: tuple[tuple[str, str], ...] = (
@@ -15,6 +15,7 @@ _PARAM_LABELS: tuple[tuple[str, str], ...] = (
     ("CLUSTER_SOURCE", "Cluster source"),
     ("OCP_VERSION", "OCP version"),
     ("OCP_VERSION_PREFIX", "OCP version prefix (install)"),
+    ("OCP_RELEASE_CHANNEL", "OCP release channel (OpenShift CI)"),
     ("CLEANUP", "Cleanup before install"),
     ("HYPERSHIFT_INSTANCE_TYPE", "HyperShift instance type"),
     ("PRODUCT", "Product"),
@@ -209,17 +210,17 @@ def _target_cluster_line(
             f"  Target cluster: (unresolved — secret {secret_name} missing, deleted, or has no cluster label; "
             "re-upload with --external-kubeconfig to label the Secret)"
         )
-    if source == CLUSTER_SOURCE_EAAS:
+    if source == CLUSTER_SOURCE_EPHC:
         ocp = (params.get("OCP_VERSION_PREFIX") or "").strip()
         if ocp:
             return f"  Target cluster: ephemeral (OCP {ocp})"
-        return "  Target cluster: EaaS provisioned"
+        return "  Target cluster: EPHC provisioned"
     ocp = (params.get("OCP_VERSION_PREFIX") or "").strip()
     if ocp:
         return f"  Target cluster: ephemeral (OCP {ocp})"
     product = (params.get("PRODUCT") or "").strip().lower()
     if product in ("rhoai", "odh"):
-        return "  Target cluster: EaaS provisioned (default)"
+        return "  Target cluster: EPHC provisioned (default)"
     return None
 
 

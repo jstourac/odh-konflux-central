@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -172,12 +173,17 @@ class RunBvtPytestFallbackTest(unittest.TestCase):
         env = {
             "BVT_SUITE": "health",
             "ARTIFACTS_DIR": "/artifacts",
-            "CLUSTER_SOURCE": "EAAS",
+            "CLUSTER_SOURCE": "EPHC",
             "PRODUCT": "rhoai",
         }
         with (
             mock.patch.dict("os.environ", env, clear=False),
             mock.patch.object(run_bvt_pytest, "_prepare_bvt_oc"),
+            mock.patch(
+                "steps.prepare_bvt_cluster_nodes.prepare_bvt_cluster_nodes",
+                return_value=0,
+            ),
+            mock.patch("steps.prepare_bvt_dsc_ready.prepare_bvt_dsc_ready", return_value=0),
             mock.patch.object(run_bvt_pytest, "run_single", side_effect=_record_run_single),
             mock.patch.object(
                 run_bvt_pytest,
@@ -200,7 +206,7 @@ class RunBvtPytestFallbackTest(unittest.TestCase):
             "BVT_SUITE": "health",
             "ARTIFACTS_DIR": "/artifacts",
             "CLUSTER_SOURCE": "olminstall-kubeconfig-test",
-            "PRODUCT": "existing",
+            "PRODUCT": "",
         }
         with (
             mock.patch.dict("os.environ", env, clear=False),
@@ -225,27 +231,20 @@ class RunBvtPytestFallbackTest(unittest.TestCase):
             self.assertTrue(run_bvt_pytest._cluster_has_odh_apis())
         self.assertEqual(run_mock.call_args.args[0][0], "/tmp/tests-payload/.tools/bin/oc")
 
-    def test_token_from_kubeconfig(self) -> None:
-        from components.dashboard_cypress.config import _token_from_kubeconfig
-
+    def test_prepare_bvt_oc_sets_oc_binary_path_for_staged_oc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            kc = Path(tmp) / "config"
-            kc.write_text(
-                "\n".join(
-                    [
-                        "current-context: ctx",
-                        "contexts:",
-                        "  - name: ctx",
-                        "    context:",
-                        "      cluster: c",
-                        "      user: u",
-                        "users:",
-                        "  - name: u",
-                        "    user:",
-                        "      token: secret-token",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(_token_from_kubeconfig(str(kc)), "secret-token")
+            artifacts = Path(tmp) / "artifacts"
+            tools_bin = artifacts / "tests-payload" / ".tools" / "bin"
+            tools_bin.mkdir(parents=True)
+            staged = tools_bin / "oc"
+            staged.write_bytes(b"")
+            staged.chmod(0o755)
+            prev_path = os.environ.get("PATH", "")
+            with (
+                mock.patch.dict("os.environ", {"ARTIFACTS_DIR": str(artifacts)}, clear=False),
+                mock.patch("runners.orchestrator.stage_oc_for_pytest"),
+            ):
+                run_bvt_pytest._prepare_bvt_oc()
+                self.assertEqual(os.environ.get("OC_BINARY_PATH"), str(staged))
+            os.environ.pop("OC_BINARY_PATH", None)
+            os.environ["PATH"] = prev_path

@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS, is_external_cluster_source
+from suite.constants import product_installs_operator
+from suite.its_trigger_params import CLUSTER_SOURCE_EPHC, is_external_cluster_source
 
 _E2E_PLR_PREFIX = "e2e"
 _LEGACY_PLR_PREFIX = "olminstall"
@@ -116,11 +117,21 @@ def compact_version_for_name(version: str) -> str:
 
 
 def gates_segment_for_name(tests_csv: str) -> str:
-    """Join gate ids with hyphens: ``bvt,smoke`` → ``bvt-smoke``."""
+    """Join gate ids with hyphens; omit ``bvt`` unless it is the only gate."""
     parts = [p.strip().lower() for p in (tests_csv or "").split(",") if p.strip()]
     if not parts:
         return ""
-    return "-".join(parts)
+    if parts == ["bvt"]:
+        return "bvt"
+    return "-".join(p for p in parts if p != "bvt")
+
+
+def component_segment_for_name(components_csv: str) -> str:
+    """Include a component token only when exactly one id is requested (not ``all``)."""
+    parts = [p.strip().lower() for p in (components_csv or "").split(",") if p.strip()]
+    if len(parts) != 1 or parts[0] == "all":
+        return ""
+    return _sanitize_segment(parts[0], max_len=24)
 
 
 def cluster_segment_for_name(
@@ -139,8 +150,8 @@ def cluster_segment_for_name(
         if re.match(r"^olminstall-kubeconfig", source, re.IGNORECASE):
             return ""
         return _sanitize_segment(source, max_len=20)
-    if source == CLUSTER_SOURCE_EAAS or target_type == "eaas":
-        return "eaas"
+    if source == CLUSTER_SOURCE_EPHC or target_type in ("ephc", "ehc"):
+        return "ephc"
     return ""
 
 
@@ -169,32 +180,21 @@ def build_olminstall_generate_prefix(
     cluster_label: str = "",
     target_type: str = "",
     tests_csv: str = "",
+    components_csv: str = "",
     run_owner: str = "",
 ) -> str:
     """
     Return a ``generateName`` prefix ending with ``-``.
 
-    Pattern: ``e2e-cli-{user}-{product?}-{version?}-{cluster?}-{gates}-``
+    Pattern: ``e2e-cli-{user}-{cluster?}-{product?}-{version?}-{gates}-{component?}-``
     ``existing`` product is omitted; unknown version/cluster segments are dropped.
+    A component token is added only when ``components_csv`` is a single id (not ``all``).
     CLI-direct runs use the ``cli-{user}`` segment (Integration Service uses ``its-`` in ITS YAML).
     """
     segments: list[str] = [_E2E_PLR_PREFIX]
     user_seg = user_segment_for_name(run_owner)
     if user_seg:
         segments.append(f"cli-{user_seg}")
-    head = segments[:]
-
-    product_seg = ""
-    version_seg = ""
-    prod = (product or "").strip().lower()
-    middle: list[str] = []
-    if prod and prod != "existing":
-        product_seg = _sanitize_segment(prod, max_len=8)
-        if product_seg:
-            middle.append(product_seg)
-        version_seg = _version_name_segment(compact_version_for_name(version))
-        if version_seg:
-            middle.append(version_seg)
 
     cluster_seg = cluster_segment_for_name(
         cluster_source=cluster_source,
@@ -202,13 +202,30 @@ def build_olminstall_generate_prefix(
         target_type=target_type,
     )
     if cluster_seg:
-        middle.append(cluster_seg)
+        segments.append(cluster_seg)
+    head = segments[:]
+
+    product_seg = ""
+    version_seg = ""
+    prod = (product or "").strip().lower()
+    middle: list[str] = []
+
+    if product_installs_operator(prod):
+        product_seg = _sanitize_segment(prod, max_len=8)
+        if product_seg:
+            middle.append(product_seg)
+        version_seg = _version_name_segment(compact_version_for_name(version))
+        if version_seg:
+            middle.append(version_seg)
 
     gates_seg = gates_segment_for_name(tests_csv)
     sanitized_gates_seg = _sanitize_segment(gates_seg, max_len=24)
+    component_seg = component_segment_for_name(components_csv)
     tail: list[str] = []
     if sanitized_gates_seg:
         tail.append(sanitized_gates_seg)
+    if component_seg:
+        tail.append(component_seg)
 
     return _fit_generate_prefix(
         head=head,
@@ -266,12 +283,12 @@ def build_diagnostic_artifact_log_name(
     """
     Return ``{product}-{version?}-{cluster?}-diagnostic-{datetime}.log``.
 
-    Uses cluster-installed product/version (not ``PRODUCT=existing`` intent).
+    Uses cluster-installed product/version (not test-only PRODUCT intent).
     """
     product_seg = _sanitize_segment(installed_product, max_len=8)
     if not product_seg or product_seg == "unknown":
         raw = (pipeline_product or "").strip().lower()
-        if raw and raw != "existing":
+        if product_installs_operator(raw):
             product_seg = _sanitize_segment(raw, max_len=8) or "unknown"
         else:
             product_seg = "unknown"

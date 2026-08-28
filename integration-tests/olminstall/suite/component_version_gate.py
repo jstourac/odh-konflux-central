@@ -122,9 +122,9 @@ def component_enabled_for_version(
 def probe_operator_version_from_cluster() -> str:
     """Best-effort CSV version from KUBECONFIG (external or staged tests-shared)."""
     kc = os.environ.get("KUBECONFIG", "").strip()
-    op_ns = os.environ.get("OPERATOR_NAMESPACE", "").strip()
+    op_ns = (os.environ.get("OPERATOR_NAMESPACE", "").strip() or "redhat-ods-operator")
     op_name = (os.environ.get("OPERATOR_NAME", "") or "rhods-operator").strip()
-    if not kc or not op_ns:
+    if not kc:
         return ""
     from install.install_and_verify import pick_succeeded_csv_version
 

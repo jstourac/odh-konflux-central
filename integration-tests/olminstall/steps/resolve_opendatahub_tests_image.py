@@ -26,7 +26,9 @@ def _skip_csv_cluster_probe() -> bool:
         return True
     product = os.environ.get("PRODUCT", "").strip().lower()
     cluster_source = os.environ.get("CLUSTER_SOURCE", "").strip()
-    if product == "existing" and not cluster_source:
+    from suite.constants import is_test_only_product
+
+    if is_test_only_product(product) and not cluster_source:
         return True
     return False
 

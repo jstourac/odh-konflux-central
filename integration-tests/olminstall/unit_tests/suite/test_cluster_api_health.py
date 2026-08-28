@@ -13,6 +13,7 @@ from suite.cluster_api_health import (
     is_definitive_infra_error,
     operator_admission_webhook_unavailable_reason,
     openshift_console_route_unavailable_reason,
+    openshift_guest_rh_ai_route_tekton_unreachable_reason,
 )
 
 
@@ -26,6 +27,12 @@ class ClusterApiUnreachableTextTest(unittest.TestCase):
 
     def test_empty_when_healthy_error(self) -> None:
         msg = cluster_api_unreachable_text(stderr='Error from server (NotFound): datascienceclusters "default-dsc" not found')
+        self.assertEqual(msg, "")
+
+    def test_missing_crd_type_is_not_api_death(self) -> None:
+        msg = cluster_api_unreachable_text(
+            stderr='error: the server doesn\'t have a resource type "datasciencecluster"',
+        )
         self.assertEqual(msg, "")
 
 
@@ -88,11 +95,21 @@ class OpenShiftConsoleRouteUnavailableReasonTest(unittest.TestCase):
     def test_detects_console_dns_failure(self, mock_oc_run: MagicMock) -> None:
         mock_oc_run.return_value = MagicMock(
             returncode=1,
-            stderr="Failed to resolve downloads-openshift-console.apps.example.prod.konfluxeaas.com",
+            stderr="Failed to resolve downloads-openshift-console.apps.example.osp.rh-ods.com",
             stdout="",
         )
         reason = openshift_console_route_unavailable_reason()
-        self.assertIn("cluster API unreachable", reason)
+        self.assertIn("openshift console route unreachable", reason)
+
+    @patch("suite.cluster_api_health.socket.getaddrinfo", side_effect=OSError("no such host"))
+    @patch("suite.cluster_api_health.oc_run")
+    def test_skips_dns_probe_for_konflux_ocp_ci_guest_console(self, mock_oc_run: MagicMock, _mock_dns: MagicMock) -> None:
+        mock_oc_run.return_value = MagicMock(
+            returncode=0,
+            stderr="",
+            stdout="https://console-openshift-console.apps.34de191502702cfbdd1d.prod.konflux-ocp-ci.dev\n",
+        )
+        self.assertEqual(openshift_console_route_unavailable_reason(), "")
 
     @patch("suite.cluster_api_health.socket.getaddrinfo", side_effect=OSError("no such host"))
     @patch("suite.cluster_api_health.oc_run")
@@ -100,10 +117,10 @@ class OpenShiftConsoleRouteUnavailableReasonTest(unittest.TestCase):
         mock_oc_run.return_value = MagicMock(
             returncode=0,
             stderr="",
-            stdout="https://console-openshift-console.apps.example.prod.konfluxeaas.com\n",
+            stdout="https://console-openshift-console.apps.example.osp.rh-ods.com\n",
         )
         reason = openshift_console_route_unavailable_reason()
-        self.assertIn("cluster API unreachable", reason)
+        self.assertIn("openshift console route unreachable", reason)
         self.assertIn("no such host", reason)
 
     @patch("suite.cluster_api_health.socket.getaddrinfo", return_value=[(None, None, None, None, ("10.0.0.1", 443))])
@@ -112,13 +129,58 @@ class OpenShiftConsoleRouteUnavailableReasonTest(unittest.TestCase):
         mock_oc_run.return_value = MagicMock(
             returncode=0,
             stderr="",
-            stdout="https://console-openshift-console.apps.example.prod.konfluxeaas.com\n",
+            stdout="https://console-openshift-console.apps.example.osp.rh-ods.com\n",
         )
         self.assertEqual(openshift_console_route_unavailable_reason(), "")
 
 
+class OpenshiftGuestRhAiRouteTektonUnreachableTest(unittest.TestCase):
+    @patch("suite.cluster_api_health._extended_ephc_infra_probes_enabled", return_value=False)
+    def test_empty_when_not_in_pipeline(self, _mock_extended: MagicMock) -> None:
+        self.assertEqual(openshift_guest_rh_ai_route_tekton_unreachable_reason(), "")
+
+    @patch("suite.cluster_api_health._extended_ephc_infra_probes_enabled", return_value=True)
+    @patch("suite.cluster_api_health.socket.getaddrinfo", side_effect=OSError("no such host"))
+    @patch("suite.cluster_api_health.oc_run")
+    def test_reports_rh_ai_dns_on_oci_guest(
+        self,
+        mock_oc_run: MagicMock,
+        _mock_dns: MagicMock,
+        _mock_extended: MagicMock,
+    ) -> None:
+        mock_oc_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stderr="",
+                stdout="https://console-openshift-console.apps.abc.prod.konflux-ocp-ci.dev\n",
+            ),
+            MagicMock(
+                returncode=0,
+                stderr="",
+                stdout="rh-ai.apps.abc.prod.konflux-ocp-ci.dev",
+            ),
+        ]
+        reason = openshift_guest_rh_ai_route_tekton_unreachable_reason()
+        self.assertIn("openshift console route unreachable", reason)
+        self.assertIn("no such host", reason)
+
+
 class ClusterSmokeInfraBlockedReasonTest(unittest.TestCase):
-    @patch("suite.cluster_api_health._extended_eaas_infra_probes_enabled", return_value=False)
+    @patch("suite.cluster_api_health._persist_cluster_api_unreachable")
+    @patch("suite.cluster_api_health._prior_cluster_api_unreachable_reason", return_value="prior elb death")
+    def test_returns_prior_marker_without_probe(
+        self,
+        _mock_prior: MagicMock,
+        mock_persist: MagicMock,
+    ) -> None:
+        with patch(
+            "suite.cluster_api_health.cluster_api_unreachable_reason",
+        ) as mock_api:
+            self.assertEqual(cluster_smoke_infra_blocked_reason(), "prior elb death")
+            mock_api.assert_not_called()
+            mock_persist.assert_not_called()
+
+    @patch("suite.cluster_api_health._extended_ephc_infra_probes_enabled", return_value=False)
     @patch("suite.cluster_api_health.cluster_api_unreachable_reason")
     def test_api_only_when_not_in_pipeline(
         self,
@@ -133,7 +195,23 @@ class ClusterSmokeInfraBlockedReasonTest(unittest.TestCase):
             self.assertEqual(cluster_smoke_infra_blocked_reason(), "")
             mock_webhook.assert_not_called()
 
-    @patch("suite.cluster_api_health._extended_eaas_infra_probes_enabled", return_value=True)
+    @patch("suite.cluster_api_health._extended_ephc_infra_probes_enabled", return_value=True)
+    @patch("suite.cluster_api_health.openshift_console_route_unavailable_reason", return_value="console dead")
+    @patch("suite.cluster_api_health.operator_admission_webhook_unavailable_reason", return_value="")
+    @patch("suite.cluster_api_health.cluster_api_unreachable_reason")
+    def test_returns_console_reason_when_not_oci_guest(
+        self,
+        mock_api: MagicMock,
+        _mock_webhook: MagicMock,
+        mock_console: MagicMock,
+        _mock_extended: MagicMock,
+    ) -> None:
+        mock_api.return_value = ""
+        self.assertEqual(cluster_smoke_infra_blocked_reason(), "console dead")
+
+    @patch("suite.cluster_api_health._persist_cluster_api_unreachable")
+    @patch("suite.cluster_api_health._prior_cluster_api_unreachable_reason", return_value="")
+    @patch("suite.cluster_api_health._extended_ephc_infra_probes_enabled", return_value=True)
     @patch("suite.cluster_api_health.openshift_console_route_unavailable_reason", return_value="")
     @patch("suite.cluster_api_health.operator_admission_webhook_unavailable_reason", return_value="")
     @patch("suite.cluster_api_health.cluster_api_unreachable_reason")
@@ -143,12 +221,15 @@ class ClusterSmokeInfraBlockedReasonTest(unittest.TestCase):
         _mock_webhook: MagicMock,
         _mock_console: MagicMock,
         _mock_extended: MagicMock,
+        _mock_prior: MagicMock,
+        mock_persist: MagicMock,
     ) -> None:
         mock_api.return_value = "cluster API unreachable: no such host"
         self.assertEqual(
             cluster_smoke_infra_blocked_reason(),
             "cluster API unreachable: no such host",
         )
+        mock_persist.assert_called_once_with("cluster API unreachable: no such host")
 
 
 if __name__ == "__main__":

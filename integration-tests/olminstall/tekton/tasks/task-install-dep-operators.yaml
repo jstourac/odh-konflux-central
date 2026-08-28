@@ -41,7 +41,7 @@ spec:
       default: ""
     - name: PRODUCT
       type: string
-      default: "existing"
+      default: ""
     - name: RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS
       type: string
       default: "false"
@@ -72,6 +72,12 @@ spec:
           - key: kubeconfig
             path: kubeconfig
     - name: smoke-aws-credentials
+      emptyDir: {}
+    - name: vault-approle
+      secret:
+        secretName: vault-approle
+        optional: true
+    - name: tenant-test-secrets
       secret:
         optional: true
         secretName: $(params.SMOKE_AWS_SECRET)
@@ -80,12 +86,12 @@ spec:
       - name: OLMINSTALL_OC_VERBOSE
         value: "1"
   steps:
-    - name: prepare-kubeconfig-eaas
-      displayName: Stage EaaS kubeconfig
+    - name: prepare-kubeconfig-ephc
+      displayName: Stage EPHC kubeconfig
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: in
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
       volumeMounts:
         - name: credentials
@@ -98,11 +104,11 @@ spec:
         set -euo pipefail
         src="${TESTS_SHARED}/credentials/kubeconfig"
         if [[ ! -f "${src}" ]]; then
-          echo "ERROR: EaaS kubeconfig missing at ${src} (expected install-ocp-cluster to stage it)" >&2
+          echo "ERROR: EPHC kubeconfig missing at ${src} (expected stage-ephemeral-kubeconfig to stage it)" >&2
           exit 1
         fi
         cp "${src}" /credentials/kubeconfig
-        echo "EaaS kubeconfig staged at /credentials/kubeconfig (from tests-shared)"
+        echo "EPHC kubeconfig staged at /credentials/kubeconfig (from tests-shared)"
 
     - name: clone-olminstall
       displayName: Clone olminstall repository
@@ -135,7 +141,7 @@ spec:
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: notin
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
       volumeMounts:
         - name: credentials
@@ -199,9 +205,14 @@ spec:
       volumeMounts:
         - name: credentials
           mountPath: /credentials
+        - name: vault-approle
+          mountPath: /vault-approle
+          readOnly: true
+        - name: tenant-test-secrets
+          mountPath: /tenant-test-secrets
+          readOnly: true
         - name: smoke-aws-credentials
           mountPath: /smoke-aws-credentials
-          readOnly: true
       env:
         - name: KUBECONFIG
           value: /credentials/kubeconfig
