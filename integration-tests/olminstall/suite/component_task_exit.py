@@ -9,6 +9,16 @@ from pathlib import Path
 from suite.component_junit import junit_counts, junit_pass_rate
 
 
+def component_exit_file_path(artifacts_dir: Path, component_id: str = "") -> Path:
+    """Per-component exit marker in Tekton (avoids stale shared component-test.exit)."""
+    cid = (component_id or "").strip()
+    if cid:
+        if "/" in cid or "\\" in cid or ".." in cid:
+            raise ValueError(f"invalid component_id: {component_id!r}")
+        return artifacts_dir / f"{cid}.component-test.exit"
+    return artifacts_dir / "component-test.exit"
+
+
 def _nonzero_exit(raw_ec: int) -> int:
     return raw_ec if raw_ec != 0 else 1
 

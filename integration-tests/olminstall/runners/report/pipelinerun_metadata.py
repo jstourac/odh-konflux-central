@@ -41,8 +41,10 @@ from suite.constants import (
     LABEL_KONFLUX_APPLICATION,
     LABEL_TRIGGER_EVENT_TYPE,
     TRIGGER_TYPE_MANUAL,
+    DEFAULT_ARTIFACT_BROWSER_REPO_PATH,
+    DEFAULT_ARTIFACT_BROWSER_URL,
 )
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS, external_kubeconfig_secret_name, is_external_cluster_source
+from suite.its_trigger_params import CLUSTER_SOURCE_EPHC, external_kubeconfig_secret_name, is_external_cluster_source
 from k8s.github_url import normalize_https_git_url, parse_github_org_repo
 from runners.report.konflux_pac_metadata import (
     build_pull_request_pac_metadata,
@@ -100,13 +102,13 @@ def infer_installed_product(operator_name: str, operator_version: str) -> str:
 
 
 def resolve_target_type(prj: dict[str, Any]) -> str:
-    """external | eaas | stub from PipelineRun params."""
+    """external | ephc | stub from PipelineRun params."""
     source = pipelinerun_param_value(prj, "CLUSTER_SOURCE", "").strip()
     product = pipelinerun_param_value(prj, "PRODUCT", "").strip().lower()
     if is_external_cluster_source(source):
         return "external"
-    if source == CLUSTER_SOURCE_EAAS or (not source and product in ("rhoai", "odh")):
-        return "eaas"
+    if source == CLUSTER_SOURCE_EPHC or (not source and product in ("rhoai", "odh")):
+        return "ephc"
     return "stub"
 
 
@@ -140,7 +142,7 @@ def _read_label(prj: dict[str, Any], key: str) -> str:
 def cluster_label_from_cluster_source(cluster_source: str) -> str:
     """Derive a short cluster label from a tenant kubeconfig Secret name."""
     secret = (cluster_source or "").strip()
-    if not secret or secret == CLUSTER_SOURCE_EAAS:
+    if not secret or secret == CLUSTER_SOURCE_EPHC:
         return ""
     for prefix in ("olminstall-kubeconfig-", "kubeconfig-"):
         if secret.startswith(prefix):
@@ -195,7 +197,11 @@ def merge_patch_pipelinerun_labels(
     namespace: str,
     labels: dict[str, str],
 ) -> bool:
-    clean = {k: sanitize_k8s_label_value(v) for k, v in labels.items() if sanitize_k8s_label_value(v)}
+    clean: dict[str, str] = {}
+    for key, value in labels.items():
+        sanitized = sanitize_k8s_label_value(value)
+        if sanitized:
+            clean[key] = sanitized
     return _k8s_merge_patch(pipeline_run, namespace, labels=clean)
 
 
@@ -468,7 +474,7 @@ def build_trigger_annotations(
     cluster_key: str = "",
 ) -> dict[str, str]:
     """Annotations set at Snapshot / PipelineRun trigger (CLI)."""
-    out: dict[str, str] = {ANNOTATION_PRODUCT: (product or "existing").strip().lower()}
+    out: dict[str, str] = {ANNOTATION_PRODUCT: (product or "").strip().lower()}
     if (tests or "").strip():
         out[ANNOTATION_TESTS] = tests.strip()
     for key, val in ((ANNOTATION_CLUSTER, cluster), (ANNOTATION_CLUSTER_KEY, cluster_key)):
@@ -496,7 +502,7 @@ def build_trigger_labels(
     owner = sanitize_k8s_label_value(run_owner)
     if owner:
         out[LABEL_RUN_OWNER] = owner
-    prod = sanitize_k8s_label_value((product or "existing").strip().lower())
+    prod = sanitize_k8s_label_value((product or "").strip().lower())
     if prod:
         out[LABEL_PRODUCT] = prod
     tgt = sanitize_k8s_label_value(target_type)
@@ -505,9 +511,30 @@ def build_trigger_labels(
     cl = sanitize_k8s_label_value(cluster)
     if cl:
         out[LABEL_CLUSTER] = cl
-    elif target_type == "eaas":
-        out[LABEL_CLUSTER] = "eaas-pending"
+    elif target_type == "ephc":
+        out[LABEL_CLUSTER] = "ephc-pending"
     return out
+
+
+def _resolve_runtime_cluster(
+    doc: dict[str, Any],
+    runs: list[dict[str, Any]],
+) -> str:
+    """Best-effort cluster name from task results, prior metadata, or CLUSTER_SOURCE."""
+    for task_name in (
+        "stage-ephemeral-kubeconfig",
+        "install-ocp-cluster",
+        "provision-cluster",
+        "external-cluster-ready",
+    ):
+        name = task_result(runs, task_name, "clusterName")
+        if name:
+            return name
+    return (
+        _read_annotation(doc, ANNOTATION_CLUSTER)
+        or _read_label(doc, LABEL_CLUSTER)
+        or cluster_label_from_cluster_source(pipelinerun_param_value(doc, "CLUSTER_SOURCE", ""))
+    )
 
 
 def build_runtime_metadata(
@@ -526,14 +553,7 @@ def build_runtime_metadata(
     annotations: dict[str, str] = {}
     labels: dict[str, str] = {}
 
-    cluster = (
-        task_result(runs, "install-ocp-cluster", "clusterName")
-        or task_result(runs, "provision-cluster", "clusterName")
-        or task_result(runs, "external-cluster-ready", "clusterName")
-        or _read_annotation(doc, ANNOTATION_CLUSTER)
-        or _read_label(doc, LABEL_CLUSTER)
-        or cluster_label_from_cluster_source(pipelinerun_param_value(doc, "CLUSTER_SOURCE", ""))
-    )
+    cluster = _resolve_runtime_cluster(doc, runs)
     if cluster:
         annotations[ANNOTATION_CLUSTER] = cluster
         cl = sanitize_k8s_label_value(cluster)
@@ -567,8 +587,8 @@ def build_runtime_metadata(
         tests_csv=tests_csv,
         pipeline_run=pipeline_run,
         taskruns=runs,
-        browser_base=browser_base or "https://app-artifact-browser.apps.rosa.konflux-qe.zmr9.p3.openshiftapps.com",
-        repo_path=repo_path or "odh-ci-artifacts",
+        browser_base=browser_base or DEFAULT_ARTIFACT_BROWSER_URL,
+        repo_path=repo_path or DEFAULT_ARTIFACT_BROWSER_REPO_PATH,
     )
     if artifacts_url:
         annotations[ANNOTATION_TEST_RESULTS_URL] = artifacts_url

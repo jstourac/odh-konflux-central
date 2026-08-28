@@ -4,7 +4,6 @@
 # Run ``runners/report/prune_stale_testops_its.py`` before raw ``oc create -f config/test-snapshot.yaml``.
 names:
   - odh-olminstall-testops
-  - odh-olminstall-testops-eaas
   - odh-olminstall-testops-rh-nightly
   - odh-olminstall-smoke-testops
   - rhoai-test

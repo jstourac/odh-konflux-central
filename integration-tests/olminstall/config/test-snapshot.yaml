@@ -4,7 +4,7 @@
 #
 # containerImage below is used only for manual ``oc create -f`` and as a rhoai/odh
 # fallback when ``olm_pipeline.py`` cannot resolve the latest Konflux build. It is
-# NOT used for default ``--product existing`` triggers (SNAPSHOT omits containerImage;
+# NOT used for default ``--omit-product`` triggers (SNAPSHOT omits containerImage;
 # extract-fbcf-image records n/a).
 #
 # Pinned fallback: RHOAI 3.5 EA2 (rhoai-v3-5-ea-2), OCP 4.21 (rhoai-fbc-fragment-ocp-421).
@@ -13,7 +13,7 @@
 #
 # Prerequisites:
 #   1. The ITS CR must already be applied:
-#      oc apply -n rhoai-tenant -f integration-tests/olminstall/tekton/its/its-rhoai-e2e-eaas-ocp421.yaml
+#      oc apply -n rhoai-tenant -f integration-tests/olminstall/tekton/its/its-rhoai-e2e-ephc-ocp421.yaml
 #
 # Usage:
 #   oc create -n rhoai-tenant -f integration-tests/olminstall/config/test-snapshot.yaml

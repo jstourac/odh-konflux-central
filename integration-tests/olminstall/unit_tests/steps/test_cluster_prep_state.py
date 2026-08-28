@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from steps.cluster_prep_state import (
+    cluster_api_unreachable_marker_reason,
     cluster_prep_already_done,
     dep_operators_already_done,
     maas_gateway_https_blocked_reason,
     maas_gateway_https_failed_reason,
+    mark_cluster_api_unreachable,
     mark_cluster_prep_done,
     mark_dep_operators_done,
     mark_maas_gateway_https_failed,
@@ -60,6 +62,15 @@ def test_maas_gateway_https_blocked_reason_prefixes_unmarked_prior_failure(tmp_p
     reason = maas_gateway_https_blocked_reason()
     assert reason.startswith("MaaS gateway HTTPS service not ready")
     assert "gateway wait timed out after 480s" in reason
+
+
+def test_cluster_api_unreachable_marker_scoped_to_pipelinerun(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TESTS_SHARED", str(tmp_path))
+    monkeypatch.setenv("PIPELINE_RUN_NAME", "pr-api-1")
+    mark_cluster_api_unreachable("cluster API unreachable: dial tcp: lookup elb.example")
+    assert "elb.example" in cluster_api_unreachable_marker_reason()
+    monkeypatch.setenv("PIPELINE_RUN_NAME", "pr-api-2")
+    assert cluster_api_unreachable_marker_reason() == ""
 
 
 def test_maas_gateway_https_blocked_clears_when_live_stack_ready(tmp_path, monkeypatch) -> None:

@@ -6,19 +6,22 @@ from __future__ import annotations
 import os
 import sys
 
-from helpers.tekton_incluster import namespace_from_env, pipeline_run_name_from_env
+from steps.tekton_incluster import namespace_from_env, pipeline_run_name_from_env
 from k8s.external_kubeconfig import wait_for_external_cluster_idle
 from suite.constants import DEFAULT_CLUSTER_IDLE_POLL_SEC, DEFAULT_CLUSTER_IDLE_WAIT_SEC
 from suite.errors import AppError
 from suite.its_trigger_params import is_external_cluster_source
 
 
+_TRUTHY = frozenset({"1", "true", "yes"})
+
+
 def _env_bool(name: str) -> bool:
-    return (os.environ.get(name, "") or "").strip().lower() in ("1", "true", "yes")
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
 
 
 def _env_int(name: str, default: int) -> int:
-    raw = (os.environ.get(name, "") or "").strip()
+    raw = os.environ.get(name, "").strip()
     if not raw:
         return default
     try:

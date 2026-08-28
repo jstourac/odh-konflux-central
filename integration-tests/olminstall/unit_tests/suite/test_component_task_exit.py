@@ -6,9 +6,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from suite.component_task_exit import resolve_component_exit_codes, resolve_junit_aggregate_exit
+from suite.component_task_exit import (
+    component_exit_file_path,
+    resolve_component_exit_codes,
+    resolve_junit_aggregate_exit,
+)
 
 class ComponentTaskExitTest(unittest.TestCase):
+    def test_component_exit_file_path_rejects_path_separators(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                component_exit_file_path(root, "../other")
+            with self.assertRaises(ValueError):
+                component_exit_file_path(root, "foo/bar")
+
     def test_partial_pass_keeps_tekton_exit_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

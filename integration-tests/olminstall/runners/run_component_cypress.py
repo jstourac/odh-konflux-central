@@ -21,6 +21,7 @@ from _bootstrap import ensure_olminstall_path
 
 ensure_olminstall_path()
 
+from runners.component_junit import write_single_failure_junit
 from suite.component_runner_env import component_golang_env_path, load_component_runner_env
 from components.dashboard_cypress.config import (
     inject_auth_into_cypress_run_command,
@@ -135,12 +136,34 @@ def _fail_or_warn_gateway(msg: str) -> int | None:
     return None
 
 
+def _write_early_failure(
+    msg: str, *, artifacts_dir: Path, testcase_name: str, artifact_prefix: str = ""
+) -> None:
+    payload_root = resolve_tests_payload_root(artifacts_dir.parent)
+    plan_path = component_test_plan_path(payload_root)
+    comp = component_from_plan(plan_path, "dashboard_cypress") if plan_path.is_file() else None
+    prefix = (
+        artifact_prefix
+        or ((comp or {}).get("artifact_prefix") or "").strip()
+        or "dashboard-cypress-smoke"
+    )
+    record = {**(comp or {"id": "dashboard_cypress"}), "artifact_prefix": prefix}
+    write_single_failure_junit(
+        record,
+        artifacts_dir=artifacts_dir,
+        testcase_name=testcase_name,
+        message=msg,
+    )
+
+
 def main() -> int:
     artifacts_dir = _artifacts_dir()
     os.environ.setdefault("ARTIFACTS", str(artifacts_dir))
     envfile = component_golang_env_path(artifacts_dir, "dashboard_cypress")
     if not envfile.is_file():
-        print(f"ERROR: missing {envfile} (orchestrate step did not run)", file=sys.stderr)
+        msg = f"missing {envfile} (orchestrate step did not run)"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        _write_early_failure(msg, artifacts_dir=artifacts_dir, testcase_name="missing_envfile")
         return 2
 
     runner_env = load_component_runner_env(envfile)
@@ -154,7 +177,14 @@ def main() -> int:
     ensure_cypress_cli_packages()
     kubeconfig_src = os.environ.get("KUBECONFIG", "").strip()
     if not kubeconfig_src:
-        print("ERROR: KUBECONFIG is required", file=sys.stderr)
+        msg = "KUBECONFIG is required"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        _write_early_failure(
+            msg,
+            artifacts_dir=artifacts_dir,
+            testcase_name="missing_kubeconfig",
+            artifact_prefix=runner_env.get("ARTIFACT_PREFIX", ""),
+        )
         return 2
     staged_kubeconfig = stage_writable_kubeconfig(artifacts_dir, kubeconfig_src)
     os.environ["KUBECONFIG"] = str(staged_kubeconfig)
@@ -270,19 +300,45 @@ def main() -> int:
         )
 
     if not odh_dashboard_url:
-        print("ERROR: ODH_DASHBOARD_URL or BASE_URL is not set", file=sys.stderr)
+        msg = "ODH_DASHBOARD_URL or BASE_URL is not set"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        _write_early_failure(
+            msg,
+            artifacts_dir=artifacts_dir,
+            testcase_name="missing_url",
+            artifact_prefix=runner_env.get("ARTIFACT_PREFIX", ""),
+        )
         return 2
     auth_err = validate_gateway_cypress_auth(odh_dashboard_url=odh_dashboard_url)
     if auth_err is not None:
+        _write_early_failure(
+            "gateway auth validation failed",
+            artifacts_dir=artifacts_dir,
+            testcase_name="auth_validation_failed",
+            artifact_prefix=runner_env.get("ARTIFACT_PREFIX", ""),
+        )
         return auth_err
     if not verify_dashboard_reachable(odh_dashboard_url):
-        print(f"ERROR: dashboard not reachable at {odh_dashboard_url}", file=sys.stderr)
+        msg = f"dashboard not reachable at {odh_dashboard_url}"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        _write_early_failure(
+            msg,
+            artifacts_dir=artifacts_dir,
+            testcase_name="unreachable",
+            artifact_prefix=runner_env.get("ARTIFACT_PREFIX", ""),
+        )
         return 2
     if not verify_dashboard_serves_html(odh_dashboard_url):
-        print(
-            f"ERROR: dashboard did not serve text/html at {odh_dashboard_url} "
-            "(gateway text/plain breaks cy.visit; wait for Authorino/OAP recovery)",
-            file=sys.stderr,
+        msg = (
+            f"dashboard did not serve text/html at {odh_dashboard_url} "
+            "(gateway text/plain breaks cy.visit; wait for Authorino/OAP recovery)"
+        )
+        print(f"ERROR: {msg}", file=sys.stderr)
+        _write_early_failure(
+            msg,
+            artifacts_dir=artifacts_dir,
+            testcase_name="not_html",
+            artifact_prefix=runner_env.get("ARTIFACT_PREFIX", ""),
         )
         return 2
 
@@ -313,6 +369,12 @@ def main() -> int:
         ensure_google_chrome()
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        _write_early_failure(
+            str(exc),
+            artifacts_dir=artifacts_dir,
+            testcase_name="missing_chrome",
+            artifact_prefix=runner_env.get("ARTIFACT_PREFIX", ""),
+        )
         return 2
 
     timeout_sec: float | None = None
@@ -322,6 +384,12 @@ def main() -> int:
             timeout_sec = parse_component_timeout_seconds(timeout_raw)
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
+            _write_early_failure(
+                str(exc),
+                artifacts_dir=artifacts_dir,
+                testcase_name="invalid_timeout",
+                artifact_prefix=runner_env.get("ARTIFACT_PREFIX", ""),
+            )
             return 2
 
     extra_skip = cypress_extra_skip_tags(odh_dashboard_url=odh_dashboard_url)

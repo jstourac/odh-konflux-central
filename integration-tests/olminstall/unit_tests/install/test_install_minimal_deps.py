@@ -28,6 +28,10 @@ _MAAS_COMMON_PATCHES = (
 )
 
 
+def _bash_setup_calls(mock_run: MagicMock) -> list:
+    return [c for c in mock_run.call_args_list if c.args and c.args[0] and c.args[0][0] == "bash"]
+
+
 class _PatchStack(ExitStack):
     """Flatten env + patch.context nesting in install_minimal_deps tests."""
 
@@ -72,9 +76,21 @@ class InstallMinimalDepsTest(unittest.TestCase):
             "install.install_minimal_deps.ensure_jobset_and_lws_operator_crs",
         )
         cls._jobset_lws_patcher.start()
+        cls._openshift_gateway_patcher = patch(
+            "install.install_minimal_deps.ensure_openshift_gateway_istio_for_dep_operators",
+            return_value=True,
+        )
+        cls._openshift_gateway_patcher.start()
+        cls._reconcile_servicemesh_patcher = patch(
+            "install.install_minimal_deps.reconcile_servicemesh_olm_conflicts",
+            return_value=0,
+        )
+        cls._reconcile_servicemesh_patcher.start()
 
     @classmethod
     def tearDownClass(cls) -> None:
+        cls._reconcile_servicemesh_patcher.stop()
+        cls._openshift_gateway_patcher.stop()
         cls._jobset_lws_patcher.stop()
         cls._maas_prep_patcher.stop()
         cls._serverless_patcher.stop()
@@ -106,7 +122,7 @@ class InstallMinimalDepsTest(unittest.TestCase):
                 stack.with_maas_common_patches()
                 run = stack.with_patch("install.install_minimal_deps.subprocess.run")
                 self.assertEqual(main(), 0)
-                run.assert_not_called()
+                self.assertEqual(_bash_setup_calls(run), [])
 
     def test_runs_setup_when_extra_args_and_stack_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,7 +158,7 @@ class InstallMinimalDepsTest(unittest.TestCase):
                 run = stack.with_patch("install.install_minimal_deps.subprocess.run")
                 run.return_value = MagicMock(returncode=0)
                 self.assertEqual(main(), 0)
-                run.assert_called_once()
+                self.assertEqual(len(_bash_setup_calls(run)), 1)
 
     def test_skips_setup_on_existing_when_dependency_stack_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -156,7 +172,7 @@ class InstallMinimalDepsTest(unittest.TestCase):
             env = _minimal_env(
                 olm_dir=olm_dir,
                 kubeconfig=kubeconfig,
-                PRODUCT="existing",
+                PRODUCT="",
                 SETUP_DEPENDENCIES_ARGS="-M",
                 COMPONENTS_CSV="maas_billing",
             )
@@ -173,7 +189,7 @@ class InstallMinimalDepsTest(unittest.TestCase):
                                 ):
                                     with patch("install.install_minimal_deps.subprocess.run") as run:
                                         self.assertEqual(main(), 0)
-                                        run.assert_not_called()
+                                        self.assertEqual(_bash_setup_calls(run), [])
 
     def test_reconcile_rhcl_after_setup_dependencies_on_maas_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -298,7 +314,7 @@ class InstallMinimalDepsTest(unittest.TestCase):
                 olm_dir=olm_dir,
                 kubeconfig=kubeconfig,
                 SETUP_DEPENDENCIES_ARGS="-M",
-                PRODUCT="existing",
+                PRODUCT="",
                 COMPONENTS_CSV="maas_billing",
             )
             with patch.dict(os.environ, env, clear=True):
@@ -355,7 +371,7 @@ class InstallMinimalDepsTest(unittest.TestCase):
                                             return_value=subprocess.CompletedProcess(args=[], returncode=0),
                                         ) as run:
                                             self.assertEqual(main(), 0)
-                                            run.assert_called_once()
+                                            self.assertEqual(len(_bash_setup_calls(run)), 1)
                                             finalize.assert_not_called()
 
     def test_product_install_recovers_authorino_when_setup_succeeds_but_cr_missing(self) -> None:
@@ -465,7 +481,7 @@ class InstallMinimalDepsTest(unittest.TestCase):
     def test_install_dependencies_deferred_authorino_when_rhcl_functional(self) -> None:
         with patch.dict(
             os.environ,
-            {"PRODUCT": "existing", "INSTALL_DEPENDENCIES": "true"},
+            {"PRODUCT": "", "INSTALL_DEPENDENCIES": "true"},
             clear=False,
         ):
             with patch(
@@ -521,6 +537,29 @@ class InstallMinimalDepsTest(unittest.TestCase):
                                             ):
                                                 self.assertEqual(main(), 0)
                                                 bvt_prereq.assert_called_once()
+
+    def test_rhoai_install_reconciles_openshift_gateway_istio_before_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kubeconfig = root / "kubeconfig"
+            kubeconfig.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
+            olm_dir = root / "olminstall"
+            olm_dir.mkdir()
+
+            env = _minimal_env(
+                olm_dir=olm_dir,
+                kubeconfig=kubeconfig,
+                PRODUCT="rhoai",
+                COMPONENTS_CSV="dashboard_cypress",
+            )
+            with patch.dict(os.environ, env, clear=True):
+                with patch(
+                    "install.install_minimal_deps.ensure_openshift_gateway_istio_for_dep_operators",
+                    return_value=True,
+                ) as reconcile:
+                    self.assertEqual(main(), 0)
+                    reconcile.assert_called_once()
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

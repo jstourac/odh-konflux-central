@@ -20,7 +20,7 @@ class ResolveOperatorE2eImageTest(unittest.TestCase):
                 {
                     "OPERATOR_VERSION": "3.5.0-ea.2",
                     "RESULT_PATH": str(result),
-                    "PRODUCT": "existing",
+                    "PRODUCT": "",
                     "CLUSTER_SOURCE": "olminstall-kubeconfig-nmanos-konflux1",
                 },
                 clear=False,

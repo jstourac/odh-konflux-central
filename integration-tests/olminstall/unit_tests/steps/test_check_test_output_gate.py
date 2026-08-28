@@ -52,22 +52,3 @@ class CheckTestOutputGateTest(unittest.TestCase):
         )
         self.assertEqual(ec, 0)
 
-    def test_smoke_gate_allows_warning(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "out.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "result": "WARNING",
-                        "successes": 33,
-                        "failures": 2,
-                        "skipped": 114,
-                        "note": "smoke: 22% pass rate (33 passed, 2 failed, 114 skipped)",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            ec, msg = check_test_output_file(path, gate_label="Smoke")
-            self.assertEqual(ec, 0)
-            self.assertIn("22%", msg)
-

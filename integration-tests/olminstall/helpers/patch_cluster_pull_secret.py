@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Merge quay.io/rhoai credentials into the EaaS cluster's global pull secret,
+Merge quay.io/rhoai credentials into the EPHC cluster's global pull secret,
 pre-create an imagePullSecret in openshift-marketplace for OLM pods, and
 register an additional-pull-secret in kube-system for HyperShift node sync.
 

@@ -34,7 +34,7 @@ class FinalizeComponentTaskExitTest(unittest.TestCase):
     def test_attributed_drift_fails_tekton(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = Path(tmp)
-            (artifacts / "component-test.exit").write_text("0", encoding="ascii")
+            (artifacts / "dashboard_cypress.component-test.exit").write_text("0", encoding="ascii")
             self._env(artifacts, "dashboard_cypress")
             drifts = ["dashboard: Managed\u2192Removed"]
             with mock.patch(
@@ -44,14 +44,14 @@ class FinalizeComponentTaskExitTest(unittest.TestCase):
                 ec = finalize_component_task_exit.main()
             self.assertEqual(ec, 1)
             self.assertEqual(
-                (artifacts / "component-test.exit").read_text(encoding="ascii"), "1"
+                (artifacts / "dashboard_cypress.component-test.exit").read_text(encoding="ascii"), "1"
             )
 
     def test_published_test_output_zero_success_fails_tekton_for_red_dag(self) -> None:
         """0 successes must fail finalize so Konflux DAG is red (not yellow Succeeded)."""
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = Path(tmp)
-            (artifacts / "component-test.exit").write_text("1", encoding="ascii")
+            (artifacts / "ogx.component-test.exit").write_text("1", encoding="ascii")
             (artifacts / "ogx-smoke.xml").write_text(
                 '<?xml version="1.0"?><testsuites tests="4" failures="4" errors="0" skipped="0"/>',
                 encoding="utf-8",
@@ -87,14 +87,14 @@ class FinalizeComponentTaskExitTest(unittest.TestCase):
                 ec = finalize_component_task_exit.main()
             self.assertEqual(ec, 1)
             self.assertEqual(
-                (artifacts / "component-test.exit").read_text(encoding="ascii"), "1"
+                (artifacts / "ogx.component-test.exit").read_text(encoding="ascii"), "1"
             )
 
     def test_published_test_output_partial_pass_keeps_tekton_exit_zero(self) -> None:
         """Some passed + some failed → yellow WARNING; TaskRun stays Succeeded."""
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = Path(tmp)
-            (artifacts / "component-test.exit").write_text("1", encoding="ascii")
+            (artifacts / "ogx.component-test.exit").write_text("1", encoding="ascii")
             (artifacts / "ogx-smoke.xml").write_text(
                 '<?xml version="1.0"?><testsuites tests="4" failures="1" errors="0" skipped="0">'
                 "<testcase classname='a' name='t1'/><testcase classname='a' name='t2'/>"
@@ -136,7 +136,7 @@ class FinalizeComponentTaskExitTest(unittest.TestCase):
     def test_no_drift_preserves_pass_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = Path(tmp)
-            (artifacts / "component-test.exit").write_text("0", encoding="ascii")
+            (artifacts / "workbenches.component-test.exit").write_text("0", encoding="ascii")
             self._env(artifacts)
             with mock.patch(
                 "steps.finalize_component_task_exit.finalize_component_dsc_hygiene",
@@ -144,4 +144,30 @@ class FinalizeComponentTaskExitTest(unittest.TestCase):
             ):
                 ec = finalize_component_task_exit.main()
             self.assertEqual(ec, 0)
+
+    def test_stale_shared_exit_file_ignored_when_test_output_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = Path(tmp)
+            (artifacts / "component-test.exit").write_text("0", encoding="ascii")
+            self._env(artifacts, "model_server")
+            test_output = artifacts / "TEST_OUTPUT.json"
+            test_output.write_text(
+                json.dumps(
+                    {
+                        "result": "FAILURE",
+                        "failures": 1,
+                        "successes": 0,
+                        "note": "model_server: infrastructure error",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["TEST_OUTPUT_PATH"] = str(test_output)
+            self.addCleanup(lambda: os.environ.pop("TEST_OUTPUT_PATH", None))
+            with mock.patch(
+                "steps.finalize_component_task_exit.finalize_component_dsc_hygiene",
+                return_value=[],
+            ):
+                ec = finalize_component_task_exit.main()
+            self.assertEqual(ec, 1)
 

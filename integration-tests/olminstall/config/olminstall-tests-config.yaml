@@ -28,7 +28,7 @@ phases:
   - id: smoke
     description: >
       Per-component smoke suites (see olminstall-components-smoke.yaml and COMPONENTS param).
-      Requires EaaS cluster and install when PRODUCT is rhoai/odh.
+      Requires a workload cluster with installation when PRODUCT is rhoai/odh (EPHC or external kubeconfig).
     requiredInSelection: false
     default: true
     setsPipelineResults:

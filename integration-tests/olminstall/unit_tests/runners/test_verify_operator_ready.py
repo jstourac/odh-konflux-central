@@ -27,7 +27,7 @@ class VerifyOperatorReadyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(
                 "os.environ",
-                {"KUBECONFIG": "/tmp/kc", "PRODUCT": "existing", "TESTS_SHARED": tmp},
+                {"KUBECONFIG": "/tmp/kc", "PRODUCT": "", "TESTS_SHARED": tmp},
                 clear=False,
             ):
                 self.assertEqual(verify_operator_ready.main(), 0)
@@ -61,7 +61,7 @@ class VerifyOperatorReadyTest(unittest.TestCase):
             "os.environ",
             {
                 "KUBECONFIG": "/tmp/kc",
-                "PRODUCT": "existing",
+                "PRODUCT": "",
                 "COMPONENTS_CSV": "model_server",
                 "RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS": "true",
             },
@@ -84,7 +84,7 @@ class VerifyOperatorReadyTest(unittest.TestCase):
             "os.environ",
             {
                 "KUBECONFIG": "/tmp/kc",
-                "PRODUCT": "existing",
+                "PRODUCT": "",
                 "COMPONENTS_CSV": "model_server",
             },
             clear=False,

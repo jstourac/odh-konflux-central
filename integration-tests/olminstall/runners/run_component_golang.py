@@ -26,7 +26,10 @@ ensure_olminstall_path()
 
 from helpers.log_redact import redact_command_for_log
 from suite.component_dsc_gate import smoke_component_prereq_unavailable
-from suite.cluster_api_health import cluster_smoke_infra_blocked_reason
+from suite.cluster_api_health import (
+    cluster_smoke_infra_blocked_reason,
+    openshift_guest_rh_ai_route_tekton_unreachable_reason,
+)
 from suite.dsc_baseline import reconcile_baseline_dsc_before_component
 from suite.component_version_gate import resolve_operator_version_for_gates
 from suite.component_test_timeout import (
@@ -46,11 +49,10 @@ from components.dashboard_cypress.config import (
 from components.dashboard_cypress.source_ref import resolve_dashboard_git_source
 from runners.orchestrator import stage_cypress_cli_tools
 from runners.component_prereqs import prepare_component_for_smoke, _external_existing_cluster, run_pooled_external_smoke_prep
-from runners.component_junit import prereq_junit_outcome
+from runners.component_junit import prereq_junit_outcome, write_single_failure_junit
 from runners.run_component_pytest import (
     _accumulate_exit_file,
     _artifacts_dir,
-    _write_single_failure_junit,
     _filter_component_id,
     _iter_components_from_plan,
     _plan_component_test_phases,
@@ -151,7 +153,7 @@ def _write_skip_golang_env(
     outcome: str = "skip",
 ) -> int:
     print(f"SKIP {filter_id}: {message}", flush=True)
-    _write_single_failure_junit(
+    write_single_failure_junit(
         comp,
         artifacts_dir=artifacts_dir,
         testcase_name=testcase_name,
@@ -302,6 +304,9 @@ def main() -> int:
     artifacts_dir = _artifacts_dir()
     os.environ.setdefault("ARTIFACTS_DIR", str(artifacts_dir))
     prepare_kubeconfig_auth_for_tests(tekton_kubeconfig_path=tekton_kubeconfig)
+    from k8s.jenkins_vault import ensure_runtime_vault_env
+
+    ensure_runtime_vault_env()
 
     component_phases = _plan_component_test_phases(plan_path)
     if not component_phases:
@@ -320,7 +325,14 @@ def main() -> int:
     results_dir = str(runner_raw.get("results_dir", "")).strip()
     phase_commands_raw = runner_raw.get("phase_commands")
     if not working_dir or not results_dir or not isinstance(phase_commands_raw, dict):
-        print(f"ERROR: invalid runner block for {filter_id!r} in plan", file=sys.stderr)
+        msg = f"invalid runner block for {filter_id!r} in plan"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        write_single_failure_junit(
+            comp,
+            artifacts_dir=artifacts_dir,
+            testcase_name="invalid_plan",
+            message=msg,
+        )
         return 2
 
     try:
@@ -333,9 +345,22 @@ def main() -> int:
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        write_single_failure_junit(
+            comp,
+            artifacts_dir=artifacts_dir,
+            testcase_name="invalid_context",
+            message=str(exc),
+        )
         return 2
     if not run_command:
-        print(f"ERROR: no run command for phases {component_phases!r}", file=sys.stderr)
+        msg = f"no run command for phases {component_phases!r}"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        write_single_failure_junit(
+            comp,
+            artifacts_dir=artifacts_dir,
+            testcase_name="no_command",
+            message=msg,
+        )
         return 2
 
     by_gate_raw = comp.get("component_test_timeout_by_gate")
@@ -355,6 +380,12 @@ def main() -> int:
         test_timeout_sec = parse_component_timeout_seconds(timeout_raw)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        write_single_failure_junit(
+            comp,
+            artifacts_dir=artifacts_dir,
+            testcase_name="invalid_timeout",
+            message=str(exc),
+        )
         return 2
 
     env_path = component_golang_env_path(artifacts_dir, filter_id)
@@ -391,6 +422,31 @@ def main() -> int:
             skip_tag="version",
             testcase_name="version_not_supported",
             message=version_skip,
+            artifacts_dir=artifacts_dir,
+            env_path=env_path,
+            skip_path=skip_path,
+            working_dir=working_dir,
+            results_dir=results_dir,
+            run_command=run_command,
+            env_defaults=env_defaults,
+            test_timeout_sec=test_timeout_sec,
+            source_repo=source_repo,
+            source_ref=source_ref,
+        )
+
+    rh_ai_apps_reason = (
+        openshift_guest_rh_ai_route_tekton_unreachable_reason()
+        if filter_id in {"workbench_images", "mlflow"}
+        else ""
+    )
+    if rh_ai_apps_reason:
+        print(f"SKIP golang {filter_id}: {rh_ai_apps_reason}", flush=True)
+        return _write_skip_golang_env(
+            comp=comp,
+            filter_id=filter_id,
+            skip_tag="rh_ai_route_dns",
+            testcase_name="openshift_guest_apps_route_unreachable",
+            message=rh_ai_apps_reason,
             artifacts_dir=artifacts_dir,
             env_path=env_path,
             skip_path=skip_path,
@@ -460,6 +516,28 @@ def main() -> int:
                 outcome=prereq_junit_outcome(reason),
             )
 
+    api_reason = cluster_smoke_infra_blocked_reason()
+    if api_reason:
+        print(f"FAIL golang {filter_id}: {api_reason}", flush=True)
+        return _write_skip_golang_env(
+            comp=comp,
+            filter_id=filter_id,
+            skip_tag="api_unreachable",
+            testcase_name="cluster_smoke_infra_blocked",
+            message=api_reason,
+            artifacts_dir=artifacts_dir,
+            env_path=env_path,
+            skip_path=skip_path,
+            working_dir=working_dir,
+            results_dir=results_dir,
+            run_command=run_command,
+            env_defaults=env_defaults,
+            test_timeout_sec=test_timeout_sec or 0.0,
+            source_repo=source_repo,
+            source_ref=source_ref,
+            outcome="failure",
+        )
+
     skip_path.unlink(missing_ok=True)
     if filter_id == "dashboard_cypress":
         stage_cypress_cli_tools()
@@ -499,6 +577,18 @@ def main() -> int:
         from components.trainer.smoke import prepend_trainer_smoke_patch
 
         run_command = prepend_trainer_smoke_patch(run_command)
+    elif filter_id == "kuberay":
+        from components.kuberay.auth_options import prepend_kuberay_auth_options_skip
+
+        run_command = prepend_kuberay_auth_options_skip(run_command)
+    elif filter_id == "mlflow":
+        from components.mlflow.ephc_tracking import prepend_mlflow_ephc_tracking
+
+        run_command = prepend_mlflow_ephc_tracking(run_command)
+    elif filter_id == "platform":
+        from components.platform.smoke import prepend_platform_smoke_command
+
+        run_command = prepend_platform_smoke_command(run_command)
     _write_env_file(
         env_path,
         skip=False,

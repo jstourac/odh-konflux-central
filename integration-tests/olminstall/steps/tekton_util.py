@@ -962,7 +962,7 @@ def _olminstall_cluster_admin_sa_ready(oc: str, oc_env: dict[str, str], *, timeo
 
 
 def _ensure_olminstall_cluster_admin_sa(oc: str, oc_env: dict[str, str]) -> bool:
-    """Ensure a cluster-admin SA exists for minting pytest/golang bearer tokens on EaaS."""
+    """Ensure a cluster-admin SA exists for minting pytest/golang bearer tokens on EPHC."""
     slow_timeout = int(os.environ.get("OLMINSTALL_OC_SLOW_TIMEOUT_SEC", "120"))
     get = run(
         [oc, "get", "sa", _CLUSTER_ADMIN_SA_NAME, "-n", _CLUSTER_ADMIN_SA_NS],
@@ -1055,12 +1055,12 @@ def _oc_whoami_t(env: dict[str, str]) -> str:
     return (proc.stdout or "").strip() if proc.returncode == 0 else ""
 
 
-def _eaas_cluster_source(env: dict[str, str]) -> bool:
-    return env.get("CLUSTER_SOURCE", "").strip() in ("", "EAAS")
+def _ephc_cluster_source(env: dict[str, str]) -> bool:
+    return env.get("CLUSTER_SOURCE", "").strip() in ("", "EPHC")
 
 
 def _token_from_oc_create_token(path: Path, env: dict[str, str]) -> str:
-    """Mint a cluster-admin bearer token using client-cert admin kubeconfig on EaaS."""
+    """Mint a cluster-admin bearer token using client-cert admin kubeconfig on EPHC."""
     oc = _resolve_oc_binary(env)
     if not oc:
         return ""
@@ -1143,7 +1143,7 @@ def _resolve_bearer_token_from_kubeconfig(path: Path, env: dict[str, str]) -> st
             return ""
         return token
 
-    if _eaas_cluster_source(env):
+    if _ephc_cluster_source(env):
         if oc and _oc_authenticated(oc, env):
             minted = _token_from_oc_create_token(path, env)
             if minted:
@@ -1176,7 +1176,7 @@ def _resolve_bearer_token_from_kubeconfig(path: Path, env: dict[str, str]) -> st
 def ensure_kubeconfig_bearer_token(environ: dict[str, str] | None = None) -> None:
     """Embed a bearer token in the writable kubeconfig for pytest ``current_client_token``.
 
-    EaaS kubeconfigs often ship with client-cert auth or a stale ``user.token`` that satisfies
+    EPHC kubeconfigs often ship with client-cert auth or a stale ``user.token`` that satisfies
     ``oc`` but not opendatahub-tests ``get_openshift_token(client=admin_client)``; refresh via
     ``oc whoami -t`` or ``oc create token`` when ``oc`` is available (tr274 / zq8p8).
     """
@@ -1206,14 +1206,14 @@ def ensure_kubeconfig_bearer_token(environ: dict[str, str] | None = None) -> Non
             )
         return
     oc = _resolve_oc_binary(env)
-    if _eaas_cluster_source(env) and oc:
+    if _ephc_cluster_source(env) and oc:
         admin_kc = _admin_kubeconfig_path(env)
         admin_env = _oc_env_for_kubeconfig(env, admin_kc) if admin_kc else env
         if not _token_has_cluster_admin(oc, token, path, env) and not (
             admin_kc and _oc_has_cluster_admin(oc, admin_env)
         ) and not _oc_has_cluster_admin(oc, env):
             print(
-                "WARN: refusing to materialize non-cluster-admin bearer token on EaaS",
+                "WARN: refusing to materialize non-cluster-admin bearer token on EPHC",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1225,7 +1225,7 @@ def ensure_kubeconfig_bearer_token(environ: dict[str, str] | None = None) -> Non
         or _kubeconfig_user_uses_client_cert(path)
         or token != existing
         or not existing_authenticated
-        or (_eaas_cluster_source(env) and bool(token))
+        or (_ephc_cluster_source(env) and bool(token))
     )
     env["OPENSHIFT_TOKEN"] = token
     env.setdefault("OC_TOKEN", token)

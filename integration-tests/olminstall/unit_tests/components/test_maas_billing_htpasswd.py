@@ -142,7 +142,7 @@ class MaasBillingHtpasswdTest(unittest.TestCase):
             apply_maas_billing_htpasswd_test_user_overrides()
         read_vault.assert_not_called()
 
-    def test_eaas_skips_vault_ldap_without_htpasswd_idp(self) -> None:
+    def test_ephc_skips_vault_ldap_without_htpasswd_idp(self) -> None:
         """HyperShift often blocks OAuth IdP; vault LDAP cannot log in — use admin SA only."""
         vault = {
             "TEST_USER_USERNAME": "ldap-user1",
@@ -162,7 +162,7 @@ class MaasBillingHtpasswdTest(unittest.TestCase):
             ),
             mock.patch("install.ldap.cluster_has_htpasswd_identity", return_value=False),
             mock.patch("components.codeflare_sdk.auth.cluster_has_htpasswd_identity", return_value=False),
-            mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False),
+            mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False),
         ):
             overlay = apply_maas_billing_htpasswd_test_user_overrides()
             self.assertNotIn("TEST_USER_USERNAME", os.environ)
@@ -259,14 +259,14 @@ class MaasBillingRosaHcpPytestSkipTest(unittest.TestCase):
             extra = maas_billing_aitenant_bootstrap_pytest_extra_args()
             self.assertIn("test_aitenant_bootstrap_creates_tenant_environment", extra)
 
-    def test_skip_aitenant_bootstrap_on_eaas(self) -> None:
+    def test_skip_aitenant_bootstrap_on_ephc(self) -> None:
         from components.maas_billing.oidc_users import maas_billing_aitenant_bootstrap_pytest_extra_args
 
-        with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False):
+        with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False):
             extra = maas_billing_aitenant_bootstrap_pytest_extra_args()
             self.assertIn("test_aitenant_bootstrap_creates_tenant_environment", extra)
 
-    def test_eaas_hypershift_skips_oauth_idp_tests(self) -> None:
+    def test_ephc_hypershift_skips_oauth_idp_tests(self) -> None:
         with (
             mock.patch("components.maas_billing.oidc_users._cluster_is_byoidc", return_value=False),
             mock.patch("install.ldap._cluster_is_rosa_hcp", return_value=False),
@@ -275,7 +275,7 @@ class MaasBillingRosaHcpPytestSkipTest(unittest.TestCase):
                 "install.rosa_hcp_pull_setup.is_hypershift_managed_cluster",
                 return_value=True,
             ),
-            mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False),
+            mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False),
         ):
             self.assertTrue(maas_billing_rosa_hcp_skip_htpasswd_oauth_idp())
             self.assertIn("TestAPIKeyCRUD", maas_billing_rosa_hcp_pytest_extra_args())

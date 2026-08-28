@@ -12,6 +12,7 @@ from components.maas_billing.common import (
     _GATEWAY_NS,
     _MAAS_APPS_NS,
     _MAAS_AUTH_POLICY,
+    maas_api_namespace,
 )
 
 _MAAS_GATEWAY_AUTH_POLICY = "maas-gateway-auth"
@@ -95,7 +96,7 @@ def _gateway_auth_has_api_key_validation(policy: dict) -> bool:
     except (KeyError, TypeError):
         return False
     expected = (
-        f"https://maas-api.{_MAAS_APPS_NS}.svc.cluster.local:8443/internal/v1/api-keys/validate"
+        f"https://maas-api.{maas_api_namespace()}.svc.cluster.local:8443/internal/v1/api-keys/validate"
     )
     return bool(url) and url == expected
 

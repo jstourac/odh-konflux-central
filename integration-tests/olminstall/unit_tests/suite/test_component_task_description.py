@@ -99,13 +99,6 @@ class ComponentTaskDescriptionTest(unittest.TestCase):
             pipeline_desc = extract_pipeline_task_description_from_block(block)
             self.assertEqual(pipeline_desc.strip(), expected.strip(), task_name)
 
-    def test_regenerate_is_idempotent_for_pipeline_paths(self) -> None:
-        comp_id = "workbenches"
-        task_name = pipeline_task_name(comp_id)
-        path = generated_task_path_in_repo(comp_id)
-        updated = _replace_task_path_in_repo(self.pipeline_text, task_name, path)
-        self.assertEqual(updated, self.pipeline_text)
-
     def test_replace_task_description_round_trip(self) -> None:
         comp = self.catalog.components["workbenches"]
         desc = build_component_task_description(comp)

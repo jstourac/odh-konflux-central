@@ -14,11 +14,16 @@ from pathlib import Path
 from install import install_and_verify as iav
 from install.approve_transitive_installplans import approve_pending_installplans
 from install.dsc_install import (
+    ensure_dsc_models_as_service,
     require_dsc_ready_for_install,
     setup_dsc_resources,
     wait_dsc_ready,
 )
-from install.gateway_config import ensure_rhoai_gateway_for_install, gateway_config_ready
+from install.gateway_config import (
+    ensure_rhoai_gateway_for_install,
+    gateway_config_ready,
+    reconcile_servicemesh_olm_conflicts,
+)
 
 _INSTALL_OPERATOR_SCRIPT_TIMEOUT_SEC = 2640  # Just under Tekton install-rhoai/odh 45m task limit
 
@@ -302,8 +307,33 @@ def phase_approve_transitive_olm_deps(ctx: InstallContext) -> None:
         print(f"Approved {approved} pending InstallPlan(s) in openshift-operators")
 
 
+def _ensure_gateway_before_dsc_ready() -> None:
+    """Service Mesh + GatewayConfig must exist before DSC provisions modelregistry."""
+    removed = reconcile_servicemesh_olm_conflicts("openshift-operators")
+    if removed:
+        print(
+            f"Reconciled {removed} orphan Service Mesh CSV(s) in openshift-operators (pre-DSC)",
+            flush=True,
+        )
+    approved = approve_pending_installplans("openshift-operators")
+    if approved:
+        print(
+            f"Approved {approved} gateway-stack InstallPlan(s) in openshift-operators (pre-DSC)",
+            flush=True,
+        )
+    try:
+        gateway_timeout = int(os.environ.get("GATEWAY_CONFIG_WAIT_SEC", "1200"))
+        ensure_rhoai_gateway_for_install(
+            wait_timeout_sec=gateway_timeout,
+            wait_servicemesh_first=True,
+        )
+    except Exception as exc:
+        print(f"WARN: pre-DSC gateway prep failed ({exc})", file=sys.stderr)
+
+
 def phase_post_install_dsc(ctx: InstallContext) -> None:
     setup_dsc_resources()
+    _ensure_gateway_before_dsc_ready()
     dsc_timeout = 900 if os.environ.get("COMPONENTS_CSV", "").strip() else 600
     if not wait_dsc_ready(timeout_s=dsc_timeout):
         if require_dsc_ready_for_install():
@@ -317,6 +347,20 @@ def phase_post_install_dsc(ctx: InstallContext) -> None:
             "(no BVT/smoke gate; RUN_BVT and RUN_SMOKE both false)",
             file=sys.stderr,
         )
+    components_csv = os.environ.get("COMPONENTS_CSV", "").strip()
+    serving_ids = {c.strip() for c in components_csv.split(",") if c.strip()} & {
+        "model_server",
+        "model_runtime",
+        "maas_billing",
+    }
+    if serving_ids:
+        try:
+            ensure_dsc_models_as_service()
+        except Exception as exc:
+            print(
+                f"WARN: post-install aigateway.modelsAsAService patch failed ({exc})",
+                file=sys.stderr,
+            )
     try:
         gateway_timeout = int(os.environ.get("GATEWAY_CONFIG_WAIT_SEC", "1200"))
         ensure_rhoai_gateway_for_install(wait_timeout_sec=gateway_timeout)

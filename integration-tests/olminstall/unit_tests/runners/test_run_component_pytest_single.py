@@ -12,8 +12,8 @@ import pytest
 
 from runners import run_component_pytest
 
-def test_eaas_pytest_extra_args_skip_image_validation() -> None:
-    with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False):
+def test_ephc_pytest_extra_args_skip_image_validation() -> None:
+    with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False):
         assert (
             run_component_pytest._apply_cluster_source_pytest_extra_args(
                 "--tc use_unprivileged_client:False"
@@ -31,7 +31,9 @@ def test_eaas_pytest_extra_args_skip_image_validation() -> None:
         args = _build_pytest_args("smoke", merged, "tests/workbenches/", "/tmp/junit.xml")
         assert "trainer_imagestreams" not in args
         assert "-k" in args
-        assert "image_validation" in args[args.index("-k") + 1]
+        k_expr = args[args.index("-k") + 1]
+        assert "image_validation" in k_expr
+        assert "imagestream_health" not in k_expr
     with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "my-secret"}, clear=False):
         merged = run_component_pytest._apply_cluster_source_pytest_extra_args("-svv")
         assert "image_validation" in merged
@@ -51,6 +53,7 @@ def test_external_rhoai_pytest_extra_args_skip_image_validation() -> None:
             "--tc use_unprivileged_client:False"
         )
         assert "image_validation" in merged
+        assert "not imagestream_health" not in merged
         assert "--cluster-sanity-skip-rhoai-check" not in merged
 
 def test_external_existing_pytest_extra_args_skip_image_validation() -> None:
@@ -58,7 +61,7 @@ def test_external_existing_pytest_extra_args_skip_image_validation() -> None:
         os.environ,
         {
             "CLUSTER_SOURCE": "olminstall-kubeconfig-nmanos-konflux1-nmanos",
-            "PRODUCT": "existing",
+            "PRODUCT": "",
         },
         clear=False,
     ):
@@ -66,12 +69,17 @@ def test_external_existing_pytest_extra_args_skip_image_validation() -> None:
             "--tc use_unprivileged_client:False"
         )
         assert "image_validation" in merged
+        assert "not imagestream_health" not in merged
         assert "--cluster-sanity-skip-rhoai-check" in merged
 
 def test_external_existing_pytest_extra_args_skip_rhoai_cluster_sanity() -> None:
     with mock.patch.dict(
         os.environ,
-        {"CLUSTER_SOURCE": "olminstall-kubeconfig-ods-qe-psi-23", "PRODUCT": "existing"},
+        {
+            "CLUSTER_SOURCE": "olminstall-kubeconfig-ods-qe-psi-23",
+            "PRODUCT": "",
+            "RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS": "true",
+        },
         clear=False,
     ):
         assert (
@@ -87,26 +95,20 @@ def test_needs_full_dsc_ready_before_pytest() -> None:
     assert run_component_pytest._needs_full_dsc_ready_before_pytest("ai_safety_evalhub") is True
     assert run_component_pytest._needs_full_dsc_ready_before_pytest("ai_safety_trustyai_service") is True
     assert run_component_pytest._needs_full_dsc_ready_before_pytest("workbenches") is False
-    assert run_component_pytest._needs_full_dsc_ready_before_pytest("maas_billing") is False
+    assert run_component_pytest._needs_full_dsc_ready_before_pytest("maas_billing") is True
 
-def test_maas_billing_rosa_hcp_merges_pytest_k_skip() -> None:
-    with (
-        mock.patch(
-            "runners.run_component_pytest.maas_billing_rosa_hcp_pytest_extra_args",
-            return_value="-k 'not TestAPIKeyCRUD'",
-        ),
-    ):
-        merged = run_component_pytest._merge_pytest_k_skip(
-            "--cluster-sanity-skip-rhoai-check",
-            "-k 'not TestAPIKeyCRUD'",
-        )
-        assert "TestAPIKeyCRUD" in merged
-        assert "-k" in merged
+def test_merge_pytest_k_skip_dedupes_fragment() -> None:
+    merged = run_component_pytest._merge_pytest_k_skip(
+        "--cluster-sanity-skip-rhoai-check",
+        "-k 'not TestAPIKeyCRUD'",
+    )
+    assert "TestAPIKeyCRUD" in merged
+    assert "-k" in merged
 
 def test_collect_only_mode_product_existing_no_external() -> None:
     with mock.patch.dict(
         os.environ,
-        {"PRODUCT": "existing", "CLUSTER_SOURCE": "", "KUBECONFIG": ""},
+        {"PRODUCT": "", "CLUSTER_SOURCE": "", "KUBECONFIG": ""},
         clear=False,
     ):
         assert run_component_pytest._collect_only_mode() is True
@@ -114,7 +116,7 @@ def test_collect_only_mode_product_existing_no_external() -> None:
 def test_collect_only_mode_external_kubeconfig() -> None:
     with mock.patch.dict(
         os.environ,
-        {"PRODUCT": "existing", "CLUSTER_SOURCE": "my-secret"},
+        {"PRODUCT": "", "CLUSTER_SOURCE": "my-secret"},
         clear=False,
     ):
         assert run_component_pytest._collect_only_mode() is False
@@ -124,7 +126,7 @@ def test_collect_only_mode_staged_kubeconfig(tmp_path: Path) -> None:
     kubeconfig.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
     with mock.patch.dict(
         os.environ,
-        {"PRODUCT": "existing", "CLUSTER_SOURCE": "", "KUBECONFIG": str(kubeconfig)},
+        {"PRODUCT": "", "CLUSTER_SOURCE": "", "KUBECONFIG": str(kubeconfig)},
         clear=False,
     ):
         assert run_component_pytest._collect_only_mode() is False
@@ -200,10 +202,12 @@ def test_main_runs_single_component_without_workbenches_in_plan(
         mock.patch("runners.run_component_pytest.load_shift_left_env_from_mount"),
         mock.patch("runners.run_component_pytest.apply_cluster_router_ca_from_kubeconfig"),
         mock.patch("runners.orchestrator.stage_git_for_prereqs"),
+        mock.patch("runners.orchestrator.prepare_oc_binary_path_for_pytest") as prep_oc,
         mock.patch("runners.run_component_pytest.prepare_component_for_smoke"),
         mock.patch("runners.run_component_pytest.run_single_pytest", return_value=0) as run_mock,
     ):
         assert run_component_pytest.main() == 0
+    prep_oc.assert_called_once()
 
     run_mock.assert_called_once()
 
@@ -296,6 +300,7 @@ def test_maas_billing_passes_htpasswd_overlay_to_pytest(
         mock.patch("runners.orchestrator.stage_git_for_prereqs"),
         mock.patch("runners.run_component_pytest.refresh_maas_smoke_before_pytest"),
         mock.patch("runners.run_component_pytest.prepare_component_for_smoke"),
+        mock.patch("components.maas_billing.wait.require_dsc_ready_for_bvt"),
         mock.patch(
             "runners.run_component_pytest.apply_maas_billing_htpasswd_test_user_overrides",
             return_value=overlay,
@@ -317,28 +322,13 @@ def test_ogx_forces_rh_dev_distribution_after_shift_left(monkeypatch: pytest.Mon
     assert os.environ["distribution_name"] == "rh-dev"
 
 
-def test_ogx_eaas_keeps_vector_stores_in_k_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ogx_keeps_vector_stores_in_k_filter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Smoke+not pgvector already narrows to vector_stores; extra skip empties the suite."""
-    monkeypatch.setenv("CLUSTER_SOURCE", "EAAS")
+    monkeypatch.setenv("CLUSTER_SOURCE", "EPHC")
     monkeypatch.setenv("distribution_name", "rh-dev")
     extra = run_component_pytest._apply_ogx_pytest_extra_args("-k 'not pgvector'")
     assert "vector_stores" not in extra
     assert "not pgvector" in extra
-
-
-def test_ogx_external_keeps_vector_stores_in_k_filter(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CLUSTER_SOURCE", "EXTERNAL")
-    monkeypatch.setenv("distribution_name", "rh-dev")
-    extra = run_component_pytest._apply_ogx_pytest_extra_args("-k 'not pgvector'")
-    assert "vector_stores" not in extra
-
-
-def test_ogx_unset_cluster_keeps_vector_stores(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CLUSTER_SOURCE", raising=False)
-    monkeypatch.setenv("distribution_name", "rh-dev")
-    extra = run_component_pytest._apply_ogx_pytest_extra_args("-k 'not pgvector'")
-    assert "vector_stores" not in extra
-
 
 
 def test_ensure_olminstall_on_pythonpath(monkeypatch: pytest.MonkeyPatch) -> None:

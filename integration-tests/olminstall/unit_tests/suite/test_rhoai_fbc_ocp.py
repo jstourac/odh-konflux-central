@@ -8,6 +8,7 @@ from suite.rhoai_fbc_ocp import (
     normalize_ocp_minor,
     ocp_minor_from_rhoai_fbc_name,
     rhoai_fbc_name_from_ocp_minor,
+    rhoai_fbc_name_from_rhoai_version,
 )
 
 
@@ -32,3 +33,10 @@ class RhoaiFbcOcpTests(unittest.TestCase):
     def test_normalize_rejects_patch(self) -> None:
         with self.assertRaises(ValueError):
             normalize_ocp_minor("4.21.1")
+
+    def test_ocp5_has_no_fbc_fragment(self) -> None:
+        self.assertEqual(rhoai_fbc_name_from_ocp_minor("5.0"), "")
+
+    def test_version_stream_component(self) -> None:
+        self.assertEqual(rhoai_fbc_name_from_rhoai_version("3.5"), "rhoai-fbc-fragment-v3-5")
+        self.assertEqual(rhoai_fbc_name_from_rhoai_version("3.5-ea.2"), "")

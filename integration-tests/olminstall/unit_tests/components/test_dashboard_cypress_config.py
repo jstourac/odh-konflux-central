@@ -19,6 +19,7 @@ from components.dashboard_cypress.config import (
     resolve_odh_dashboard_base_url,
     resolve_odh_dashboard_project_name,
     write_dashboard_cypress_test_config,
+    _token_from_kubeconfig,
 )
 
 def _sample_cypress_config() -> CypressRunnerConfig:
@@ -454,4 +455,60 @@ class DashboardCypressConfigTest(unittest.TestCase):
             'skipTags="@Bug @Maintain @ModelServingCI @ProjectsCI"',
             patched,
         )
+
+    def test_token_from_kubeconfig(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            kc = Path(tmp) / "config"
+            kc.write_text(
+                "\n".join(
+                    [
+                        "current-context: ctx",
+                        "contexts:",
+                        "  - name: ctx",
+                        "    context:",
+                        "      cluster: c",
+                        "      user: u",
+                        "users:",
+                        "  - name: u",
+                        "    user:",
+                        "      token: secret-token-long-enough-for-sanity-check",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _token_from_kubeconfig(str(kc)),
+                "secret-token-long-enough-for-sanity-check",
+            )
+
+    def test_load_component_runner_env_parses_exports(self) -> None:
+        from suite.component_runner_env import load_component_runner_env
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "component-golang.env"
+            run_command = json.dumps("npm run cypress:run")
+            path.write_text(
+                "\n".join(
+                    [
+                        "SKIP=false",
+                        "WORKING_DIR=packages/cypress",
+                        f"RUN_COMMAND={run_command}",
+                        "export ODH_DASHBOARD_URL='https://dash.example'",
+                        'export CYPRESS_OC_TOKEN="token123"',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                load_component_runner_env(path),
+                {
+                    "SKIP": "false",
+                    "WORKING_DIR": "packages/cypress",
+                    "RUN_COMMAND": "npm run cypress:run",
+                    "ODH_DASHBOARD_URL": "https://dash.example",
+                    "CYPRESS_OC_TOKEN": "token123",
+                },
+            )
 

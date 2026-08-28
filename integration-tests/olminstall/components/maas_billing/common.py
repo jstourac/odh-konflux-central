@@ -7,13 +7,14 @@ import os
 from pathlib import Path
 
 from install.dsc_install import dsc_crd_available, oc_run
-from install.gateway_config import cluster_source_is_eaas
+from install.gateway_config import cluster_source_is_ephc
 from k8s.kubectl_shim import kubectl_shim_dir as _kubectl_shim_dir
 
 _GATEWAY_NS = "openshift-ingress"
 _GATEWAY_NAME = "maas-default-gateway"
 _GATEWAY_SVC = f"{_GATEWAY_NAME}-openshift-default"
 _MAAS_APPS_NS = "redhat-ods-applications"
+_MAAS_API_NS_CANDIDATES = ("redhat-ai-gateway-infra", "redhat-ods-applications")
 _MAAS_AUTH_POLICY = "maas-api-auth-policy"
 _MAAS_AUTH_POLICY_PATH = Path("deployment/base/maas-api/policies/auth-policy.yaml")
 _MAAS_DB_SECRET = "maas-db-config"
@@ -44,15 +45,48 @@ def _secret_exists(namespace: str, name: str) -> bool:
     return r.returncode == 0
 
 
+def models_as_service_ready_condition_type() -> str:
+    """DSC Ready condition for MaaS (ModelsAsAServiceReady on RHOAI 3.5+)."""
+    types = _dsc_condition_types()
+    if "ModelsAsAServiceReady" in types:
+        return "ModelsAsAServiceReady"
+    return "ModelsAsServiceReady"
+
+
+def maas_api_namespace() -> str:
+    """Namespace hosting maas-api (redhat-ai-gateway-infra on RHOAI 3.5+)."""
+    for ns in _MAAS_API_NS_CANDIDATES:
+        r = oc_run(
+            ["get", "deployment", "maas-api", "-n", ns],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        if r.returncode == 0:
+            return ns
+    return _MAAS_APPS_NS
+
+
+def maas_api_auth_validate_url() -> str:
+    """Internal URL Authorino uses to validate API keys against maas-api."""
+    ns = maas_api_namespace()
+    return (
+        f"https://maas-api.{ns}.svc.cluster.local:8443/internal/v1/api-keys/validate"
+    )
+
+
 def maas_api_deployment_exists() -> bool:
     """True when the RHOAI operator has created the maas-api Deployment."""
-    r = oc_run(
-        ["get", "deployment", "maas-api", "-n", _MAAS_APPS_NS],
-        check=False,
-        capture_output=True,
-        timeout=30,
-    )
-    return r.returncode == 0
+    for ns in _MAAS_API_NS_CANDIDATES:
+        r = oc_run(
+            ["get", "deployment", "maas-api", "-n", ns],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        if r.returncode == 0:
+            return True
+    return False
 
 
 def _dsc_condition(condition_type: str) -> tuple[str, str, str]:
@@ -159,7 +193,7 @@ def maas_smoke_acceptable_for_run() -> tuple[bool, str]:
 
     require_prereq = "MaaSPrerequisitesAvailable" in _dsc_condition_types()
     prereq_status, _, prereq_msg = _dsc_condition("MaaSPrerequisitesAvailable")
-    maas_status, _, maas_msg = _dsc_condition("ModelsAsServiceReady")
+    maas_status, _, maas_msg = _dsc_condition(models_as_service_ready_condition_type())
     ready_status, _, ready_msg = _dsc_condition("Ready")
 
     if _maas_smoke_ready(
@@ -186,10 +220,25 @@ def maas_smoke_acceptable_for_run() -> tuple[bool, str]:
                 )
             return True, "functional MaaS ready with gateway annotations"
 
+    if maas_status != "True" and ready_status == "True":
+        func_ready, func_reason = maas_functional_smoke_ready()
+        ann_ready, ann_reason = _maas_gateway_annotations_ready()
+        if func_ready and ann_ready:
+            maas_type = models_as_service_ready_condition_type()
+            lag_detail = (maas_msg or f"{maas_type} not True")[:120]
+            if require_prereq and prereq_status != "True":
+                return True, (
+                    "functional MaaS ready with gateway annotations "
+                    f"(MaaSPrerequisites lagging: {(prereq_msg or ann_reason)[:120]})"
+                )
+            return True, (
+                f"functional MaaS ready (DSC {maas_type} lagging: {lag_detail})"
+            )
+
     if require_prereq and prereq_status != "True":
         return False, prereq_msg or "MaaSPrerequisitesAvailable not True"
     if maas_status != "True":
-        return False, maas_msg or "ModelsAsServiceReady not True"
+        return False, maas_msg or f"{models_as_service_ready_condition_type()} not True"
     if ready_status != "True":
         return False, ready_msg or "DSC Ready not True"
     return False, "MaaS smoke prerequisites not ready"
@@ -197,7 +246,9 @@ def maas_smoke_acceptable_for_run() -> tuple[bool, str]:
 
 def deps_only_install_dependencies_smoke() -> bool:
     """True when MaaS smoke should use cluster checks instead of DSC conditions."""
-    if os.environ.get("PRODUCT", "").strip().lower() != "existing":
+    from suite.constants import is_test_only_product
+
+    if not is_test_only_product(os.environ.get("PRODUCT", "")):
         return False
     if not dsc_crd_available():
         return True
@@ -292,21 +343,21 @@ def _maas_gateway_https_service_ready() -> tuple[bool, str]:
 
 
 def _maas_gateway_ready_for_smoke() -> tuple[bool, str]:
-    """Gateway ready for MaaS pytest: Programmed=True, or EaaS functional fallback."""
+    """Gateway ready for MaaS pytest: Programmed=True, or EPHC functional fallback."""
     programmed, prog_reason = _maas_gateway_programmed()
     if programmed:
         return True, ""
-    if cluster_source_is_eaas():
+    if cluster_source_is_ephc():
         ann_ready, ann_reason = _maas_gateway_annotations_ready()
         if ann_ready:
             return True, (
-                "EaaS: gateway functional (Authorino TLS annotated) without "
+                "EPHC: gateway functional (Authorino TLS annotated) without "
                 f"Programmed=True ({prog_reason})"
             )
         dsc_met, dsc_msg = _dsc_maas_prerequisites_met()
         if dsc_met:
             return True, (
-                "EaaS: trusting DSC MaaSPrerequisitesMet without "
+                "EPHC: trusting DSC MaaSPrerequisitesMet without "
                 f"Programmed=True ({(dsc_msg or prog_reason)[:120]})"
             )
         return False, ann_reason or prog_reason

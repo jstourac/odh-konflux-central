@@ -14,7 +14,7 @@ spec:
       description: workbench-images-tests Playwright image
     - name: PRODUCT
       type: string
-      default: "existing"
+      default: ""
     - name: CLUSTER_SOURCE
       type: string
       default: ""
@@ -32,7 +32,7 @@ spec:
       default: ""
     - name: COMPONENT_VAULT_SECRET
       type: string
-      default: "unused-component-vault-secret"
+      default: "vault-approle"
     - name: ARTIFACT_BROWSER_URL
       type: string
     - name: ARTIFACT_BROWSER_REPO_PATH
@@ -47,16 +47,31 @@ spec:
     - name: TASK_MESSAGE
       description: Pass/fail summary for Konflux task Results panel
   volumes:
-    - name: component-vault-credentials
+    - name: vault-approle
+      secret:
+        secretName: vault-approle
+        optional: true
+    - name: tenant-test-secrets
       secret:
         optional: true
         secretName: $(params.COMPONENT_VAULT_SECRET)
+    - name: component-vault-credentials
+      emptyDir: {}
   steps:
 
     - name: orchestrate-playwright-test
       displayName: Prepare Playwright test run
       onError: continue
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
+      volumeMounts:
+        - name: vault-approle
+          mountPath: /vault-approle
+          readOnly: true
+        - name: tenant-test-secrets
+          mountPath: /tenant-test-secrets
+          readOnly: true
+        - name: component-vault-credentials
+          mountPath: /component-vault-credentials
       env:
         - name: KUBECONFIG
           value: $(workspaces.tests-shared.path)/credentials/kubeconfig
@@ -104,9 +119,14 @@ spec:
           memory: 4Gi
           cpu: "1"
       volumeMounts:
+        - name: vault-approle
+          mountPath: /vault-approle
+          readOnly: true
+        - name: tenant-test-secrets
+          mountPath: /tenant-test-secrets
+          readOnly: true
         - name: component-vault-credentials
           mountPath: /component-vault-credentials
-          readOnly: true
       env:
         - name: KUBECONFIG
           value: $(workspaces.tests-shared.path)/credentials/kubeconfig
@@ -122,9 +142,14 @@ spec:
         #!/usr/bin/env bash
         set -euo pipefail
         ARTIFACTS="${ARTIFACTS_DIR:-/artifacts}"
+        mkdir -p "$ARTIFACTS"
         ENVFILE="${ARTIFACTS}/component-golang-${COMPONENT_ID}.env"
         if [ ! -f "$ENVFILE" ]; then
           echo "ERROR: missing $ENVFILE (orchestrate step did not run)" >&2
+          PFX="${ARTIFACT_PREFIX:-${COMPONENT_ID}-smoke}"
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<testsuite name="%s" tests="1" failures="1"><testcase classname="%s" name="orchestration_failure"><failure message="Missing orchestration env file"/></testcase></testsuite>\n' \
+            "${COMPONENT_ID}" "${COMPONENT_ID}" > "${ARTIFACTS}/${PFX}.xml"
+          echo "2" > "${ARTIFACTS}/component-test.exit"
           exit 2
         fi
         # shellcheck disable=SC1090
@@ -174,7 +199,13 @@ spec:
           done < <(find "$RESULTS_DIR" -name 'junit.xml' -print0 2>/dev/null || true)
         fi
         if [ -z "$found" ]; then
-          echo "WARN: no JUnit under ${RESULTS_DIR}" >&2
+          if [ "$ec" -ne 0 ]; then
+            echo "WARN: no JUnit under ${RESULTS_DIR}; writing synthetic failure" >&2
+            PFX="${ARTIFACT_PREFIX:-${COMPONENT_ID}-smoke}"
+            printf '<?xml version="1.0" encoding="utf-8"?>\n<testsuite name="%s" tests="1" failures="1" errors="0" skipped="0" time="0">\n  <testcase classname="%s" name="execution_failure" time="0">\n    <failure message="Component tests failed with exit %s (no JUnit produced)">\n      Check console logs for details.\n    </failure>\n  </testcase>\n</testsuite>\n' "${COMPONENT_ID}" "${COMPONENT_ID}" "$ec" > "${ARTIFACTS}/${PFX}.xml"
+          else
+            echo "WARN: no JUnit under ${RESULTS_DIR}" >&2
+          fi
         fi
         echo "$ec" > "${ARTIFACTS}/component-test.exit"
         exit "$ec"

@@ -11,6 +11,7 @@ from .cli_parser import CliArgumentParser, _KA_HOST_FROM_ENV
 from suite.component_catalog import default_components_smoke_config_path, load_components_smoke_catalog
 from suite.component_plan import validate_and_normalize_components_csv
 from suite.constants import default_tests_config_path
+from suite.constants import is_test_only_product, product_installs_operator
 from suite.errors import AppError
 from suite.its_registry import (
     integration_test_scenario_application,
@@ -23,6 +24,7 @@ from suite.tests_plan import (
     parse_tests_selection,
     validate_and_normalize_tests_csv_cli,
 )
+from suite.trigger_param_registry import apply_trigger_param_resolution
 
 _DURATION_TOKEN_RE = re.compile(r"(?i)(\d+(?:\.\d+)?)([smhd])")
 
@@ -80,23 +82,25 @@ _ENABLE_ITS_ALLOWED_TRIGGER_FLAGS = frozenset({"--konflux-repo", "--konflux-bran
 
 
 def _trigger_options_incompatible_with_query(
-    args: argparse.Namespace, *, list_ocp_on: bool = False
+    args: argparse.Namespace, *, list_ocp_on: bool = False, list_components_on: bool = False
 ) -> list[str]:
     """Trigger/install flags that cannot be combined with query/maintenance modes."""
     checks: list[tuple[bool, str]] = [
         (bool(args.image), "--image"),
         (bool(args.version), "--rhoai-version"),
-        (bool(args.channel), "--channel"),
+        (bool(args.channel), "--rhoai-channel"),
         (bool(args.konflux_repo), "--konflux-repo"),
         (bool(args.konflux_branch), "--konflux-branch"),
+        (getattr(args, "quay_pull_secret_explicit", False), "--quay-pull-secret-name"),
         (bool(args.ocp_version) and not list_ocp_on, "--ocp-version"),
-        (getattr(args, "tests_explicit", False), "--tests"),
+        (bool((getattr(args, "ocp_channel", "") or "").strip()), "--ocp-channel"),
+        (getattr(args, "tests_explicit", False) and not list_components_on, "--tests"),
         (bool((args.tests_config or "").strip()), "--tests-config"),
-        (getattr(args, "components_explicit", False), "--components"),
+        (getattr(args, "components_explicit", False) and not list_components_on, "--components"),
         (getattr(args, "test_timeout_explicit", False), "--test-timeout"),
         (bool(args.external_kubeconfig), "--external-kubeconfig"),
         (bool(args.external_kubeconfig_secret), "--external-kubeconfig-secret"),
-        (getattr(args, "cleanup", False), "--cleanup"),
+        (getattr(args, "cleanup_opt_out", False), "--cleanup false"),
         (getattr(args, "install_dependencies", False), "--install-dependencies"),
         (bool((args.tests_rhoai_version or "").strip()), "--tests-rhoai-version"),
         (bool(args.slack_channel_id), "--slack-channel-id"),
@@ -130,14 +134,39 @@ def parse_cli_args(parser: CliArgumentParser, argv: list[str]) -> argparse.Names
     components_explicit = any(x == "--components" or x.startswith("--components=") for x in argv)
     test_timeout_explicit = any(x == "--test-timeout" or x.startswith("--test-timeout=") for x in argv)
     product_explicit = any(x == "--product" or x.startswith("--product=") for x in argv)
+    quay_pull_secret_explicit = any(
+        x == "--quay-pull-secret-name" or x.startswith("--quay-pull-secret-name=") for x in argv
+    )
     konflux_app_explicit = any(
         x == "--konflux-app" or x.startswith("--konflux-app=") for x in argv
     )
+    cleanup_argv = any(x == "--cleanup" or x.startswith("--cleanup=") for x in argv)
     args = parser.parse_args(argv)
+    args.quay_pull_secret_explicit = quay_pull_secret_explicit
+    if args.cleanup is None:
+        args.cleanup = False
+    args.cleanup_maintenance = cleanup_argv and bool(args.cleanup)
+    args.cleanup_opt_out = cleanup_argv and not args.cleanup
+    args.cleanup_explicit = args.cleanup_opt_out
+
+    secret_source = (getattr(args, "secret_source", "") or "").strip().lower() or "vault"
+    if secret_source not in ("vault", "tenant"):
+        raise AppError(
+            f"invalid --secret-source / OLMINSTALL_SECRET_SOURCE={secret_source!r}; "
+            "must be vault or tenant",
+            2,
+        )
+    args.secret_source = secret_source
 
     _apply_rhoai_version_product_default(args, product_explicit=product_explicit)
-    if getattr(args, "install_dependencies", False) and args.product != "existing":
-        raise AppError("--install-dependencies is only supported with --product existing", 2)
+    if (args.version or "").strip() and not re.match(r"^\d+\.\d+", args.version.strip()):
+        raise AppError(
+            "--rhoai-version must start with MAJOR.MINOR (e.g. 3.5 or 3.5-ea.2), "
+            f"not {args.version.strip()!r}.",
+            2,
+        )
+    if getattr(args, "install_dependencies", False) and product_installs_operator(args.product):
+        raise AppError("--install-dependencies requires test-only mode (omit --product)", 2)
     if args.ocp_version:
         if not re.fullmatch(r"\d+\.\d+", args.ocp_version.strip()):
             raise AppError("--ocp-version must be MAJOR.MINOR (e.g. 4.20)", 2)
@@ -230,12 +259,15 @@ def parse_cli_args(parser: CliArgumentParser, argv: list[str]) -> argparse.Names
         )
 
     args.external_kubeconfig = (args.external_kubeconfig or "").strip()
+    args.external_kubeconfig_context = (getattr(args, "external_kubeconfig_context", "") or "").strip()
     args.external_kubeconfig_secret = (args.external_kubeconfig_secret or "").strip()
     if args.external_kubeconfig and args.external_kubeconfig_secret:
         raise AppError(
             "--external-kubeconfig and --external-kubeconfig-secret are mutually exclusive.",
             2,
         )
+    if args.external_kubeconfig_context and not args.external_kubeconfig:
+        raise AppError("--external-kubeconfig-context requires --external-kubeconfig.", 2)
     if args.external_kubeconfig:
         from k8s.external_kubeconfig import validate_kubeconfig_path
 
@@ -305,30 +337,42 @@ def parse_cli_args(parser: CliArgumentParser, argv: list[str]) -> argparse.Names
 
     list_pipelines_on = bool(args.list_pipelines)
     list_ocp_on = bool(args.list_supported_ocp)
+    list_components_on = bool(getattr(args, "list_components", False))
     watch_on = args.watch is not None
     delete_pipelines_on = bool(args.delete_pending_pipelines)
+    cleanup_maintenance_on = bool(getattr(args, "cleanup_maintenance", False))
     query_modes = sum(
-        [list_pipelines_on, list_ocp_on, watch_on, delete_pipelines_on, its_admin_on]
+        [
+            list_pipelines_on,
+            list_ocp_on,
+            list_components_on,
+            watch_on,
+            delete_pipelines_on,
+            its_admin_on,
+            cleanup_maintenance_on,
+        ]
     )
     if query_modes > 1:
         raise AppError(
-            "-l, -w, --delete-pending-pipelines, --list-supported-ocp, "
-            "--enable-its, --disable-its, and --run-its are mutually exclusive "
+            "-l, -w, --delete-pending-pipelines, --cleanup, --list-supported-ocp, "
+            "--list-components, --enable-its, --disable-its, and --run-its are mutually exclusive "
             "(pick one query/maintenance mode).",
             2,
         )
 
     if (args.external_kubeconfig or args.external_kubeconfig_secret) and args.ocp_version and not list_ocp_on:
-        if args.product == "existing":
+        if is_test_only_product(args.product):
             raise AppError(
                 "--ocp-version with --external-kubeconfig is only for --product rhoai install; "
-                "existing runs skip FBC catalog resolution.",
+                "test-only runs skip FBC catalog resolution.",
                 2,
             )
 
     if query_modes and (
         bad := _filter_trigger_flags_for_its_admin(
-            _trigger_options_incompatible_with_query(args, list_ocp_on=list_ocp_on),
+            _trigger_options_incompatible_with_query(
+                args, list_ocp_on=list_ocp_on, list_components_on=list_components_on
+            ),
             enable_its=bool(args.enable_its),
             run_its=bool(args.run_its),
         )
@@ -336,14 +380,14 @@ def parse_cli_args(parser: CliArgumentParser, argv: list[str]) -> argparse.Names
         joined = ", ".join(bad)
         raise AppError(
             f"Trigger/install options cannot be used with -l, --list-supported-ocp, "
-            f"-w, --delete-pending-pipelines, --enable-its, --disable-its, or "
-            f"--run-its: {joined}. "
-            "Use only Konflux context flags (e.g. --konflux-namespace, --konflux-app, --ka-host, "
-            "--konflux-ui; with --enable-its you may add "
-            "--konflux-repo / --konflux-branch / --konflux-app) for list/watch/delete/ITS admin; "
-            "use --run-its for one-shot debug runs with cluster/test overrides; "
-            "with --list-supported-ocp you may add --ocp-version to verify it appears in the "
-            "supported list.",
+            f"-w, --delete-pending-pipelines, --cleanup, --enable-its, --disable-its, --list-components, or "
+        f"--run-its: {joined}. "
+        "Use only Konflux context flags (e.g. --konflux-namespace, --konflux-app, --ka-host, "
+        "--konflux-ui; with --enable-its you may add "
+        "--konflux-repo / --konflux-branch / --konflux-app) for list/watch/delete/ITS admin/catalog query; "
+        "use --run-its for one-shot debug runs with cluster/test overrides; "
+        "with --list-supported-ocp you may add --ocp-version to verify it appears in the "
+        "supported list.",
             2,
         )
 
@@ -354,10 +398,19 @@ def parse_cli_args(parser: CliArgumentParser, argv: list[str]) -> argparse.Names
     if getattr(args, "dry_run", False) and not delete_pipelines_on:
         raise AppError("--dry-run requires --delete-pending-pipelines.", 2)
 
-    if not query_modes:
-        if args.cleanup and not args.external_kubeconfig_path and not args.external_kubeconfig_secret:
+    if cleanup_maintenance_on:
+        if not args.external_kubeconfig and not args.external_kubeconfig_secret:
             raise AppError(
                 "--cleanup requires --external-kubeconfig or --external-kubeconfig-secret.",
+                2,
+            )
+
+    if not query_modes:
+        its_path = getattr(args, "its_manifest_path", None)
+        apply_trigger_param_resolution(args, its_manifest_path=its_path)
+        if getattr(args, "cleanup_opt_out", False) and not args.external_kubeconfig_path and not args.external_kubeconfig_secret:
+            raise AppError(
+                "--cleanup false requires --external-kubeconfig or --external-kubeconfig-secret.",
                 2,
             )
 

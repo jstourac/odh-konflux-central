@@ -20,7 +20,11 @@ from suite.constants import (
     TRIGGER_TYPE_MANUAL,
     TRIGGER_TYPE_RH_NIGHTLY_AUTO,
 )
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS, external_kubeconfig_secret_name
+from suite.its_trigger_params import (
+    CLUSTER_SOURCE_EPHC,
+    external_kubeconfig_secret_name,
+    is_ephemeral_hosted_cluster_source,
+)
 
 _SHA256_RE = re.compile(r"@sha256:([0-9a-f]{12,64})", re.IGNORECASE)
 
@@ -106,8 +110,8 @@ def _cluster_display(cluster_source: str, cluster_annotation: str = "") -> str:
         return f"{label} ({source})"
     if label:
         return label
-    if source in ("", CLUSTER_SOURCE_EAAS):
-        return "EaaS (provision in-pipeline)"
+    if is_ephemeral_hosted_cluster_source(source):
+        return "EPHC (provision in-pipeline)"
     secret = external_kubeconfig_secret_name(source)
     if secret.startswith("olminstall-kubeconfig-"):
         return secret.removeprefix("olminstall-kubeconfig-")

@@ -16,11 +16,11 @@ from install.dependency_operators import (  # noqa: E402
 
 class DependencyOperatorsExistingTest(unittest.TestCase):
     def test_existing_smoke_without_install_dependencies(self) -> None:
-        with mock.patch.dict("os.environ", {"PRODUCT": "existing"}, clear=False):
+        with mock.patch.dict("os.environ", {"PRODUCT": ""}, clear=False):
             self.assertTrue(existing_smoke_without_install_dependencies())
         with mock.patch.dict(
             "os.environ",
-            {"PRODUCT": "existing", "INSTALL_DEPENDENCIES": "true"},
+            {"PRODUCT": "", "INSTALL_DEPENDENCIES": "true"},
             clear=False,
         ):
             self.assertFalse(existing_smoke_without_install_dependencies())
@@ -28,13 +28,13 @@ class DependencyOperatorsExistingTest(unittest.TestCase):
             self.assertFalse(existing_smoke_without_install_dependencies())
 
     def test_message_mentions_install_dependencies_flag(self) -> None:
-        with mock.patch.dict("os.environ", {"PRODUCT": "existing"}, clear=False):
+        with mock.patch.dict("os.environ", {"PRODUCT": ""}, clear=False):
             msg = _maas_deps_missing_message()
         self.assertIn("--install-dependencies", msg)
 
     def test_require_raises_with_retrigger_hint_on_existing(self) -> None:
         with (
-            mock.patch.dict("os.environ", {"PRODUCT": "existing"}, clear=False),
+            mock.patch.dict("os.environ", {"PRODUCT": ""}, clear=False),
             mock.patch(
                 "install.dependency_operators.maas_dependency_operators_ready",
                 return_value=False,

@@ -5,29 +5,30 @@ from __future__ import annotations
 import math
 import os
 
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
+from suite.its_trigger_params import CLUSTER_SOURCE_EPHC, is_ephemeral_hosted_cluster_source
 
 # Subprocess timeout for pytest runs (component smoke and BVT health checks), in seconds.
 COMPONENT_TEST_TIMEOUT_SECS_ENV = "COMPONENT_TEST_TIMEOUT_SECS"
 
-# EaaS pipeline budget is 4h; cap long runners so tail tasks fail fast when cluster dies.
-_EAAS_COMPONENT_TIMEOUT_CAP_BY_ID: dict[str, str] = {
-    "platform": "30m",
+# EPHC pipeline budget is 4h; cap long runners so tail tasks fail fast when cluster dies.
+_EHC_COMPONENT_TIMEOUT_CAP_BY_ID: dict[str, str] = {
+    # stable-3.5 platform smoke (aigateway group_4) needs >30m on EPHC; catalog is 45m.
+    "platform": "45m",
     "mlflow": "15m",
     "ogx": "20m",
 }
 
 
-def _cluster_source_is_eaas() -> bool:
+def _cluster_source_is_ephc() -> bool:
     source = os.environ.get("CLUSTER_SOURCE", "").strip()
-    return source in ("", CLUSTER_SOURCE_EAAS)
+    return is_ephemeral_hosted_cluster_source(source)
 
 
 def apply_cluster_source_timeout_cap(*, component_id: str, timeout_raw: str) -> str:
-    """Apply shorter per-component caps on EaaS without changing external-cluster catalog defaults."""
-    if not _cluster_source_is_eaas():
+    """Apply shorter per-component caps on EPHC without changing external-cluster catalog defaults."""
+    if not _cluster_source_is_ephc():
         return timeout_raw
-    cap_raw = _EAAS_COMPONENT_TIMEOUT_CAP_BY_ID.get(component_id.strip())
+    cap_raw = _EHC_COMPONENT_TIMEOUT_CAP_BY_ID.get(component_id.strip())
     if not cap_raw:
         return timeout_raw
     base = (timeout_raw or "").strip()

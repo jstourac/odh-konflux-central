@@ -15,7 +15,7 @@ class BuildSnapshotJsonTest(unittest.TestCase):
         return OLMInstallRunner(args)
 
     def test_existing_omits_container_image(self) -> None:
-        runner = self._runner(["--product", "existing"])
+        runner = self._runner([])
         spec = json.loads(runner._build_snapshot_json(odh_overrides=False))
         comp = spec["components"][0]
         self.assertNotIn("containerImage", comp)
@@ -24,7 +24,7 @@ class BuildSnapshotJsonTest(unittest.TestCase):
 
     def test_existing_with_image_includes_container_image(self) -> None:
         pullspec = "quay.io/rhoai/rhoai-fbc-fragment@sha256:deadbeef"
-        runner = self._runner(["--product", "existing", "--image", pullspec])
+        runner = self._runner(["--image", pullspec])
         spec = json.loads(runner._build_snapshot_json(odh_overrides=False))
         self.assertEqual(spec["components"][0]["containerImage"], pullspec)
 
@@ -36,7 +36,7 @@ class BuildSnapshotJsonTest(unittest.TestCase):
         self.assertTrue(img.startswith("quay.io/rhoai/rhoai-fbc-fragment@sha256:"))
 
     def test_odh_overrides_component_name(self) -> None:
-        runner = self._runner(["--product", "existing"])
+        runner = self._runner([])
         spec = json.loads(runner._build_snapshot_json(odh_overrides=True))
         self.assertEqual(spec["components"][0]["name"], "odh-operator-catalog")
 

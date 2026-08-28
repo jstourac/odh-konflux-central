@@ -8,7 +8,7 @@ import sys
 from install.approve_transitive_installplans import approve_pending_installplans
 from install.dsc_install import ensure_dashboard_gateway_prereqs
 from install.gateway_config import (
-    cluster_source_is_eaas,
+    cluster_source_is_ephc,
     ensure_rhoai_gateway_for_install,
     gateway_config_ready,
     gateway_oidc_configured,
@@ -45,21 +45,23 @@ def ensure_rhoai_gateway_stack_for_components(component_ids: set[str] | str) -> 
     if not _components_need_gateway_stack(csv):
         return
     if gateway_config_ready():
-        if cluster_source_is_eaas() and not gateway_oidc_configured():
+        if cluster_source_is_ephc() and not gateway_oidc_configured():
             print(
-                "EaaS GatewayConfig Ready but OIDC unset — running gateway OIDC patch",
+                "EPHC GatewayConfig Ready but OIDC unset — running gateway OIDC patch",
                 flush=True,
             )
         else:
             print("✓ GatewayConfig already Ready — skipping RHOAI gateway prep", flush=True)
             return
     product = os.environ.get("PRODUCT", "").strip().lower()
-    if product == "existing" and "dashboard_cypress" in ids:
+    from suite.constants import is_test_only_product
+
+    if is_test_only_product(product) and "dashboard_cypress" in ids:
         from components.dashboard_cypress.verify_route import dashboard_cypress_accessible_for_smoke
 
         if dashboard_cypress_accessible_for_smoke():
             print(
-                "PRODUCT=existing: skipping RHOAI gateway stack wait "
+                "test-only PRODUCT: skipping RHOAI gateway stack wait "
                 "(dashboard ready; Cypress uses gateway URL)",
                 flush=True,
             )

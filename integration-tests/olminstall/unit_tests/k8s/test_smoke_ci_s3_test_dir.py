@@ -49,6 +49,22 @@ class TestLogCiS3Layout(unittest.TestCase):
         self.assertIn("WARN: CI S3 layout missing", printed)
         self.assertIn("test-dir/1/mnist.xml", printed)
 
+    def test_log_model_server_treats_403_as_missing_not_crash(self) -> None:
+        client = mock.Mock()
+        client.head_object.side_effect = _client_error("403")
+        with (
+            mock.patch.object(
+                s3_probe,
+                "_resolve_ci_bucket",
+                return_value=("b", "us-east-1", None, "k", "s"),
+            ),
+            mock.patch.object(s3_probe, "_s3_client", return_value=client),
+            mock.patch("builtins.print") as print_mock,
+        ):
+            s3_probe.log_model_server_ci_s3_layout()
+        printed = " ".join(str(c.args[0]) for c in print_mock.call_args_list)
+        self.assertIn("WARN: CI S3 layout missing", printed)
+
 
 class TestModelRuntimePytestExtraArgs(unittest.TestCase):
     def test_skips_vllm_when_opt125m_missing(self) -> None:
@@ -69,17 +85,17 @@ class TestModelRuntimePytestExtraArgs(unittest.TestCase):
     def test_skip_s3_probe_defers_all_s3_skips(self) -> None:
         with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": ""}, clear=False):
             with mock.patch(
-                "k8s.smoke_ci_s3_test_dir._skip_vllm_on_eaas_or_hypershift",
+                "k8s.smoke_ci_s3_test_dir._skip_vllm_on_ephc_or_hypershift",
                 return_value=[],
             ):
                 extra = s3_probe.model_runtime_pytest_extra_args(skip_s3_probe=True)
         self.assertEqual(extra, "")
 
-    def test_eaas_always_skips_vllm(self) -> None:
+    def test_ephc_always_skips_vllm(self) -> None:
         client = mock.Mock()
         client.head_object.return_value = {}
         with (
-            mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False),
+            mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False),
             mock.patch.object(
                 s3_probe,
                 "_resolve_ci_bucket",

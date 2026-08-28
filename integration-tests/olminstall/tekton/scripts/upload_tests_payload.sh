@@ -11,7 +11,7 @@ OCI_SECRET_CONFIG="${OCI_SECRET_CONFIG:-/tmp/oci-secret-readonly/config.json}"
 TESTS_CONFIG_PATH="${TESTS_CONFIG_PATH:-${SCRIPTS_REPO_ROOT}/config/olminstall-tests-config.yaml}"
 # collect-diagnostics and publish-results are finally tasks and run in parallel.
 WAIT_FOR_ARTIFACTS_SEC="${WAIT_FOR_ARTIFACTS_SEC:-90}"
-WAIT_FOR_DIAGNOSTICS_SEC="${WAIT_FOR_DIAGNOSTICS_SEC:-${WAIT_FOR_ARTIFACTS_SEC}}"
+WAIT_FOR_DIAGNOSTICS_SEC="${WAIT_FOR_DIAGNOSTICS_SEC:-600}"
 DIAGNOSTICS_MARKER="${TESTS_PAYLOAD_DIR}/.collect-diagnostics-done"
 
 if [[ -z "$TESTS_PAYLOAD_DIR" || -z "$SCRIPTS_REPO_ROOT" || -z "$OCI_ARTIFACT_REFERENCE" ]]; then
@@ -47,6 +47,8 @@ _wait_for_collect_diagnostics() {
   echo "[WARN] collect-diagnostics marker missing; diagnostic log may be omitted from OCI upload" >&2
 }
 
+_wait_for_collect_diagnostics
+
 if ! _has_upload_files; then
   echo "[INFO] Waiting up to ${WAIT_FOR_ARTIFACTS_SEC}s for JUnit/triage artifacts (parallel finally tasks)..."
   waited=0
@@ -63,8 +65,6 @@ if ! _has_upload_files; then
   echo "[INFO] No JUnit/log files to upload"
   exit 0
 fi
-
-_wait_for_collect_diagnostics
 
 export TESTS_CONFIG_PATH
 (

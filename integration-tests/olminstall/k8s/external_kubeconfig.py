@@ -331,13 +331,7 @@ def _token_from_exec_user(kubeconfig_path: Path, user: dict) -> str:
     return token
 
 
-def materialize_kubeconfig_for_tekton(kubeconfig_path: Path) -> tuple[Path, bool]:
-    """Return a kubeconfig Tekton pods can use (token auth, no local ``oc`` exec).
-
-    When the source uses ``user.exec`` (typical after ``oc login --web``), resolve a
-    bearer token with the local ``oc`` CLI and write a minimal kubeconfig copy.
-    Caller must delete the returned path when it differs from *kubeconfig_path*.
-    """
+def _load_kubeconfig_doc(kubeconfig_path: Path) -> dict:
     import yaml
 
     try:
@@ -348,66 +342,259 @@ def materialize_kubeconfig_for_tekton(kubeconfig_path: Path) -> tuple[Path, bool
         raise AppError(f"Invalid kubeconfig YAML {kubeconfig_path}: {exc}", 2) from exc
     if not isinstance(doc, dict):
         raise AppError(f"Invalid kubeconfig (expected mapping): {kubeconfig_path}", 2)
+    return doc
 
+
+def _kubeconfig_context_user_names(doc: dict) -> list[tuple[str, str]]:
     contexts = doc.get("contexts") if isinstance(doc.get("contexts"), list) else []
-    users = doc.get("users") if isinstance(doc.get("users"), list) else []
-    current = str(doc.get("current-context") or "").strip()
-    ctx = next((c for c in contexts if isinstance(c, dict) and c.get("name") == current), None)
-    if not isinstance(ctx, dict):
-        return kubeconfig_path, False
+    out: list[tuple[str, str]] = []
+    for entry in contexts:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        context = entry.get("context") if isinstance(entry.get("context"), dict) else {}
+        user_name = str(context.get("user") or "").strip()
+        if name:
+            out.append((name, user_name))
+    return out
 
-    context = ctx.get("context") if isinstance(ctx.get("context"), dict) else {}
-    user_name = str(context.get("user") or "").strip()
-    cluster_name = str(context.get("cluster") or "").strip()
+
+def _kubeconfig_user_has_client_cert(doc: dict, user_name: str) -> bool:
+    users = doc.get("users") if isinstance(doc.get("users"), list) else []
     user_entry = next((u for u in users if isinstance(u, dict) and u.get("name") == user_name), None)
     if not isinstance(user_entry, dict):
-        return kubeconfig_path, False
-
+        return False
     user = user_entry.get("user") if isinstance(user_entry.get("user"), dict) else {}
-    if not user.get("token") and not _user_uses_exec_auth(user):
-        return kubeconfig_path, False
-
-    from steps.tekton_util import _resolve_bearer_token_from_kubeconfig
-
-    env = {**os.environ, "KUBECONFIG": str(kubeconfig_path)}
-    token = _resolve_bearer_token_from_kubeconfig(kubeconfig_path, env)
-    if not token and _user_uses_exec_auth(user):
-        token = _token_from_exec_user(kubeconfig_path, user)
-    embedded = str(user.get("token") or "").strip()
-    if not token:
-        if embedded:
-            return kubeconfig_path, False
-        raise AppError(
-            "Could not resolve bearer token for Tekton upload; refresh external cluster login and retry.",
-            2,
-        )
-    if embedded and token == embedded and not _user_uses_exec_auth(user):
-        return kubeconfig_path, False
-
-    clusters = doc.get("clusters") if isinstance(doc.get("clusters"), list) else []
-    cluster_entry = next(
-        (c for c in clusters if isinstance(c, dict) and c.get("name") == cluster_name),
-        None,
+    return bool(
+        user.get("client-certificate")
+        or user.get("client-certificate-data")
+        or user.get("client-key")
+        or user.get("client-key-data")
     )
-    if not isinstance(cluster_entry, dict):
-        raise AppError(f"Kubeconfig missing cluster {cluster_name!r} for context {current!r}", 2)
 
-    materialized = {
-        "apiVersion": "v1",
-        "kind": "Config",
-        "clusters": [cluster_entry],
-        "contexts": [ctx],
-        "current-context": current,
-        "users": [{"name": user_name, "user": {"token": token}}],
-    }
+
+def _admin_context_heuristic_score(context_name: str, user_name: str) -> int:
+    blob = f"{context_name} {user_name}".lower()
+    score = 0
+    if "cluster-admin" in blob:
+        score += 100
+    if "htpasswd-cluster-admin" in blob:
+        score += 80
+    if user_name.lower().startswith("htpasswd-"):
+        score += 40
+    return score
+
+
+def _write_kubeconfig_current_context(doc: dict, context_name: str) -> Path:
+    import yaml
+
+    contexts = _kubeconfig_context_user_names(doc)
+    if not any(name == context_name for name, _ in contexts):
+        raise AppError(f"Kubeconfig has no context {context_name!r}", 2)
+    switched = dict(doc)
+    switched["current-context"] = context_name
     tmp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".kubeconfig", delete=False)
     try:
-        yaml.safe_dump(materialized, tmp, default_flow_style=False)
+        yaml.safe_dump(switched, tmp, default_flow_style=False)
         tmp.flush()
         tmp.close()
-        return Path(tmp.name), True
+        return Path(tmp.name)
     except OSError:
         Path(tmp.name).unlink(missing_ok=True)
+        raise
+
+
+def _context_has_cluster_admin(kubeconfig_path: Path, context_name: str) -> bool:
+    from steps.tekton_util import _oc_has_cluster_admin, _resolve_oc_binary
+
+    doc = _load_kubeconfig_doc(kubeconfig_path)
+    current = str(doc.get("current-context") or "").strip()
+    temp_path: Path | None = None
+    try:
+        if context_name != current:
+            temp_path = _write_kubeconfig_current_context(doc, context_name)
+            path = temp_path
+        else:
+            path = kubeconfig_path
+        oc = _resolve_oc_binary(os.environ)
+        if not oc:
+            return False
+        env = {**os.environ, "KUBECONFIG": str(path)}
+        return _oc_has_cluster_admin(oc, env)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def resolve_external_kubeconfig_context(
+    kubeconfig_path: Path,
+    *,
+    preferred_context: str = "",
+    require_cluster_admin: bool = True,
+) -> tuple[Path, bool]:
+    """Return kubeconfig path with a cluster-admin context selected for Tekton upload.
+
+    When *require_cluster_admin* is true (default for ``--external-kubeconfig`` triggers),
+    scan contexts in the file and prefer a cluster-admin identity over the current context.
+    Returns ``(path, ephemeral)``; unlink *ephemeral* temp copies when done.
+    """
+    doc = _load_kubeconfig_doc(kubeconfig_path)
+    current = str(doc.get("current-context") or "").strip()
+    contexts = _kubeconfig_context_user_names(doc)
+    if not contexts:
+        raise AppError(f"Kubeconfig has no contexts: {kubeconfig_path}", 2)
+
+    preferred = (preferred_context or "").strip()
+    if preferred and not any(name == preferred for name, _ in contexts):
+        raise AppError(
+            f"--external-kubeconfig-context {preferred!r} not found in {kubeconfig_path}",
+            2,
+        )
+
+    if not require_cluster_admin and not preferred:
+        return kubeconfig_path, False
+
+    candidates: list[tuple[int, str]] = []
+    if preferred:
+        candidates = [(0, preferred)]
+    else:
+        for name, user_name in contexts:
+            score = _admin_context_heuristic_score(name, user_name)
+            if _kubeconfig_user_has_client_cert(doc, user_name):
+                score += 50
+            if name == current:
+                score += 10
+            candidates.append((score, name))
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+
+    admin_context = ""
+    admin_failures: list[str] = []
+    for _, name in candidates:
+        if _context_has_cluster_admin(kubeconfig_path, name):
+            admin_context = name
+            break
+        admin_failures.append(name)
+
+    if not admin_context:
+        lines = [
+            "External kubeconfig has no authenticated cluster-admin context for Tekton upload.",
+            f"Current context: {current or '(unset)'}",
+        ]
+        if preferred:
+            lines.append(f"Requested --external-kubeconfig-context: {preferred!r}")
+        else:
+            lines.append(f"Contexts checked: {', '.join(admin_failures) or '(none)'}")
+        lines.append(
+            "Re-authenticate a cluster-admin context (e.g. htpasswd-cluster-admin-user), "
+            "switch with oc config use-context, or pass --external-kubeconfig-context."
+        )
+        raise AppError("\n".join(lines), 2)
+
+    if admin_context == current:
+        return kubeconfig_path, False
+
+    print(
+        f"INFO External kubeconfig: using context {admin_context!r} (cluster-admin) "
+        f"instead of current {current!r}",
+        flush=True,
+    )
+    return _write_kubeconfig_current_context(doc, admin_context), True
+
+
+def materialize_kubeconfig_for_tekton(
+    kubeconfig_path: Path,
+    *,
+    preferred_context: str = "",
+    require_cluster_admin: bool = True,
+) -> tuple[Path, bool]:
+    """Return a kubeconfig Tekton pods can use (token auth, no local ``oc`` exec).
+
+    When the source uses ``user.exec`` (typical after ``oc login --web``), resolve a
+    bearer token with the local ``oc`` CLI and write a minimal kubeconfig copy.
+    Caller must delete the returned path when it differs from *kubeconfig_path*.
+    """
+    import yaml
+
+    context_path, context_ephemeral = resolve_external_kubeconfig_context(
+        kubeconfig_path,
+        preferred_context=preferred_context,
+        require_cluster_admin=require_cluster_admin,
+    )
+    try:
+        try:
+            doc = yaml.safe_load(context_path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise AppError(f"Cannot read kubeconfig {context_path}: {exc}", 2) from exc
+        except yaml.YAMLError as exc:
+            raise AppError(f"Invalid kubeconfig YAML {context_path}: {exc}", 2) from exc
+        if not isinstance(doc, dict):
+            raise AppError(f"Invalid kubeconfig (expected mapping): {context_path}", 2)
+
+        contexts = doc.get("contexts") if isinstance(doc.get("contexts"), list) else []
+        users = doc.get("users") if isinstance(doc.get("users"), list) else []
+        current = str(doc.get("current-context") or "").strip()
+        ctx = next((c for c in contexts if isinstance(c, dict) and c.get("name") == current), None)
+        if not isinstance(ctx, dict):
+            return context_path, context_ephemeral
+
+        context = ctx.get("context") if isinstance(ctx.get("context"), dict) else {}
+        user_name = str(context.get("user") or "").strip()
+        cluster_name = str(context.get("cluster") or "").strip()
+        user_entry = next((u for u in users if isinstance(u, dict) and u.get("name") == user_name), None)
+        if not isinstance(user_entry, dict):
+            return context_path, context_ephemeral
+
+        user = user_entry.get("user") if isinstance(user_entry.get("user"), dict) else {}
+        if not user.get("token") and not _user_uses_exec_auth(user):
+            return context_path, context_ephemeral
+
+        from steps.tekton_util import _resolve_bearer_token_from_kubeconfig
+
+        env = {**os.environ, "KUBECONFIG": str(context_path)}
+        token = _resolve_bearer_token_from_kubeconfig(context_path, env)
+        if not token and _user_uses_exec_auth(user):
+            token = _token_from_exec_user(context_path, user)
+        embedded = str(user.get("token") or "").strip()
+        if not token:
+            if embedded:
+                return context_path, context_ephemeral
+            raise AppError(
+                "Could not resolve bearer token for Tekton upload; refresh external cluster login and retry.",
+                2,
+            )
+        if embedded and token == embedded and not _user_uses_exec_auth(user):
+            return context_path, context_ephemeral
+
+        clusters = doc.get("clusters") if isinstance(doc.get("clusters"), list) else []
+        cluster_entry = next(
+            (c for c in clusters if isinstance(c, dict) and c.get("name") == cluster_name),
+            None,
+        )
+        if not isinstance(cluster_entry, dict):
+            raise AppError(f"Kubeconfig missing cluster {cluster_name!r} for context {current!r}", 2)
+
+        materialized = {
+            "apiVersion": "v1",
+            "kind": "Config",
+            "clusters": [cluster_entry],
+            "contexts": [ctx],
+            "current-context": current,
+            "users": [{"name": user_name, "user": {"token": token}}],
+        }
+        tmp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".kubeconfig", delete=False)
+        try:
+            yaml.safe_dump(materialized, tmp, default_flow_style=False)
+            tmp.flush()
+            tmp.close()
+            if context_ephemeral:
+                context_path.unlink(missing_ok=True)
+            return Path(tmp.name), True
+        except OSError:
+            Path(tmp.name).unlink(missing_ok=True)
+            raise
+    except Exception:
+        if context_ephemeral:
+            context_path.unlink(missing_ok=True)
         raise
 
 
@@ -417,10 +604,14 @@ def ensure_external_kubeconfig_secret(
     kubeconfig_path: Path,
     secret_name: str,
     run_owner: str,
+    preferred_context: str = "",
 ) -> str:
     """Create or update a generic Secret with key ``kubeconfig``; return secret name."""
     name = (secret_name or "").strip() or default_secret_name(run_owner, kubeconfig_path)
-    upload_path, ephemeral = materialize_kubeconfig_for_tekton(kubeconfig_path)
+    upload_path, ephemeral = materialize_kubeconfig_for_tekton(
+        kubeconfig_path,
+        preferred_context=preferred_context,
+    )
     try:
         if ephemeral:
             print(
@@ -926,7 +1117,7 @@ def wait_for_external_cluster_idle(
 ) -> None:
     """Wait until no other olminstall run holds the same external cluster (Jenkins resource-lock style).
 
-    No-op for EAAS or empty CLUSTER_SOURCE. When *force* is true, skip the check. When *timeout_sec*
+    No-op for EPHC or empty CLUSTER_SOURCE. When *force* is true, skip the check. When *timeout_sec*
     is 0, fail immediately if another run is active (legacy assert behavior).
     """
     from suite.its_trigger_params import is_external_cluster_source
@@ -1021,6 +1212,43 @@ def assert_external_cluster_idle(
         force=force,
         timeout_sec=0,
     )
+
+
+def assert_external_cluster_lock_queryable(
+    *,
+    namespace: str,
+    cluster_source: str,
+    cluster_id: str = "",
+    force: bool = False,
+) -> None:
+    """Fail fast when Konflux cannot query external-cluster locks (CLI trigger path).
+
+    Idle waiting is deferred to the pipeline ``external-cluster-ready`` task.
+    """
+    from suite.its_trigger_params import is_external_cluster_source
+
+    source = (cluster_source or "").strip()
+    if not is_external_cluster_source(source) or force:
+        return
+    ns = (namespace or "").strip()
+    if not ns:
+        raise AppError("Konflux namespace is required to verify external cluster availability.", 1)
+    target_id = resolve_cluster_id_for_external_cluster(
+        namespace=ns,
+        cluster_source=source,
+        cluster_id=cluster_id,
+    )
+    active = list_active_pipelineruns_for_external_cluster(
+        namespace=ns,
+        cluster_source=source,
+        cluster_id=target_id,
+    )
+    if active is None:
+        raise AppError(
+            f"Cannot verify external cluster lock for {target_id or source!r} "
+            f"(Konflux API query failed). Refusing to trigger until lock state is known.",
+            1,
+        )
 
 
 def list_active_pipelineruns_for_cluster_source(

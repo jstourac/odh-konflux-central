@@ -11,8 +11,12 @@ from components.maas_billing import oidc_users as mod  # noqa: E402
 
 class TestEnsureMaasOidcKeycloakUsers(unittest.TestCase):
     def test_skips_non_byoidc_cluster(self) -> None:
-        with mock.patch.object(mod, "_cluster_is_byoidc", return_value=False):
+        with (
+            mock.patch.object(mod, "_cluster_is_byoidc", return_value=False),
+            mock.patch.object(mod, "_keycloak_admin_token") as admin_token,
+        ):
             mod.ensure_maas_oidc_keycloak_users()
+        admin_token.assert_not_called()
 
     def test_skips_when_users_already_authenticate(self) -> None:
         with (
@@ -22,6 +26,8 @@ class TestEnsureMaasOidcKeycloakUsers(unittest.TestCase):
             mock.patch.object(mod, "_maas_client_secret", return_value="secret"),
             mock.patch.object(mod, "_byoidc_user_passwords", return_value={"odh-user1": "pw1"}),
             mock.patch.object(mod, "_password_grant_ok", return_value=True),
+            mock.patch.object(mod, "_secret_literal", return_value=""),
+            mock.patch.object(mod, "_persist_maas_client_secret_on_cluster"),
             mock.patch.object(mod, "_keycloak_admin_token") as admin_token,
         ):
             mod.ensure_maas_oidc_keycloak_users()

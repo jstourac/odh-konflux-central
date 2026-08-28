@@ -24,7 +24,7 @@ _SERVERLESS_SUB_NS = "openshift-operators"
 # Operator CSV is installed in the subscription namespace (openshift-operators), not
 # openshift-serverless (Knative workload namespace created later by the operator).
 _SERVERLESS_CSV_NAMESPACES = (_SERVERLESS_SUB_NS, "openshift-serverless")
-# EaaS fresh clusters often need >30m for Serverless CSV (Installing → Succeeded).
+# EPHC fresh clusters often need >30m for Serverless CSV (Installing → Succeeded).
 _DEFAULT_TIMEOUT_SEC = 2400
 _GRACE_POLL_SEC = 180
 

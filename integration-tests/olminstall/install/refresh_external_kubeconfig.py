@@ -8,7 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from helpers.tekton_incluster import namespace_from_env
+from steps.tekton_incluster import namespace_from_env
 from k8s.external_credentials import (
     external_credentials_secret_name,
     refresh_working_kubeconfig_from_credentials,
@@ -20,7 +20,8 @@ from suite.its_trigger_params import is_external_cluster_source
 
 
 def _env_path(name: str, default: str) -> Path:
-    return Path((os.environ.get(name, "") or default).strip() or default)
+    raw = (os.environ.get(name) or default).strip()
+    return Path(raw or default)
 
 
 def _sync_to_tests_shared(work_path: Path) -> None:

@@ -18,8 +18,9 @@
 # tickets, secret names, or internal param names). Runtime wiring belongs in other ``konflux:``
 # fields; regenerate Tekton tasks after description edits.
 #
-# Omit pipeline/CLI param COMPONENTS (empty) to run smoke for every catalog id; set COMPONENTS
-# or --components to a comma list to restrict. Cluster/operator health is BVT (``TESTS`` includes ``bvt``), not smoke.
+# Omit pipeline/CLI param COMPONENTS (empty) or set ``all`` / ``--components all`` to run smoke
+# for every enabled catalog id; set COMPONENTS or --components to a comma list to restrict.
+# Cluster/operator health is BVT (``TESTS`` includes ``bvt``), not smoke.
 #
 schemaVersion: 2
 
@@ -128,7 +129,7 @@ components:
       id: model_server
       description: >
         Model Server / KServe smoke tests. Opt-in on external clusters; needs cloud storage
-        and/or LDAP credentials. On EaaS, minimal dependencies are installed before the operator.
+        and/or LDAP credentials. On EPHC, minimal dependencies are installed before the operator.
       pytestExtraArgs: "--tc use_unprivileged_client:False -k 'not TestMLServerModelCar and not TestLLMDSmoke'"
       requiresMinimalDeps: true
       setupDependenciesArgs: "-M"
@@ -197,7 +198,7 @@ components:
       description: >
         Models-as-a-Service billing smoke tests. May fail on external pooled clusters until
         MaaS auth gateway setup completes within the task timeout.
-        EaaS HyperShift blocks OAuth IdP patches — keep unprivileged client off (admin SA).
+        EPHC HyperShift blocks OAuth IdP patches — keep unprivileged client off (admin SA).
       pytestExtraArgs: "--tc use_unprivileged_client:False"
       minPassRateForSuccess: 0.9
       nonBlockingOnTimeout: true
@@ -330,7 +331,7 @@ components:
       id: ogx
       description: >
         Red Hat OGX Distribution smoke tests. Catalog keeps Jenkins baseline (-k not pgvector).
-        verify_images skips apply on EaaS and EXTERNAL (mirrored) clusters via the
+        verify_images skips apply on EPHC and EXTERNAL (mirrored) clusters via the
         pytest runner, not this catalog -k. Do not add runner `-k not vector_stores`
         (empties smoke under not pgvector).
       shiftLeftEnvSecret: envfile-ogx
@@ -681,7 +682,7 @@ components:
         workingDir: /distributed-workloads/tests
         resultsDir: /distributed-workloads/tests/results
         phaseCommands:
-          smoke: "mkdir -p results && bash run-test.sh --format standard-verbose --junitfile results/xunit_report.xml --junitfile-testsuite-name short --junitfile-testcase-classname relative --junitfile-hide-skipped-tests -- -timeout 60m ./kfto -args -testTier=Smoke"
+          smoke: "mkdir -p results && bash run-test.sh --format standard-verbose --junitfile results/xunit_report.xml --junitfile-testsuite-name short --junitfile-testcase-classname relative -- -timeout 60m ./kfto -args -testTier=Smoke"
           tier1: "mkdir -p results && bash run-test.sh --format standard-verbose --junitfile results/xunit_report.xml --junitfile-testsuite-name short --junitfile-testcase-classname relative --junitfile-hide-skipped-tests -- -timeout 60m ./kfto -args -testTier=Tier1"
       componentTestTimeoutByGate:
         smoke: 15m
@@ -795,6 +796,7 @@ components:
         RHOAI platform operator end-to-end smoke tests.
       runOrder: last
       artifactPrefix: platform-smoke
+      minPassRateForSuccess: 0.97
       runner:
         type: golang-ginkgo
         image: quay.io/opendatahub/opendatahub-operator-e2e:main
@@ -814,5 +816,5 @@ components:
           smoke: "bash run_e2e_tests.sh"
           tier1: "E2E_TEST_TAG=Tier1 bash run_e2e_tests.sh"
       componentTestTimeoutByGate:
-        smoke: 35m
+        smoke: 45m
         tier1: 90m

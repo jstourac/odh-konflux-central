@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import re
 
-CLUSTER_SOURCE_EAAS = "EAAS"
+from suite.constants import is_test_only_product
+
+# EPHC: Ephemeral Hosted Cluster in OpenShift CI (Prow).
+CLUSTER_SOURCE_EPHC = "EPHC"
 DEFAULT_SUFFIX = " (default)"
 NOT_APPLICABLE = "n/a"
 
 _SECRET_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+_KNOWN_POOLED_EXTERNAL_SUFFIX_RE = re.compile(r"^(?:rh-nightly-pm|ods-qe-psi-\d+)$")
 _RHOAI_APP_VERSION_RE = re.compile(r"^rhoai-v(\d+)-(\d+)")
 _STABLE_CHANNEL_VERSION_RE = re.compile(r"^stable-(\d+\.\d+)$")
 _RHOAI_FBC_OCP_RE = re.compile(r"ocp-(\d)(\d{2})\b", re.IGNORECASE)
@@ -28,14 +33,59 @@ def ocp_install_prefix(value: str) -> str:
     return match.group(1) if match else ""
 
 
+def is_ephemeral_hosted_cluster_source(value: str) -> bool:
+    """True only for explicit EPHC sentinel (empty/unset is not EPHC)."""
+    return (value or "").strip() == CLUSTER_SOURCE_EPHC
+
+
 def is_external_cluster_source(value: str) -> bool:
-    """True when CLUSTER_SOURCE is a tenant Secret name (not EaaS or unset)."""
+    """True when CLUSTER_SOURCE is a tenant Secret name (not EPHC or unset)."""
     text = (value or "").strip()
-    return bool(text) and text != CLUSTER_SOURCE_EAAS
+    return bool(text) and text != CLUSTER_SOURCE_EPHC
+
+
+def _external_kubeconfig_secret_suffix(value: str) -> str:
+    secret = (value or "").strip()
+    for prefix in ("olminstall-kubeconfig-", "kubeconfig-"):
+        if secret.startswith(prefix):
+            return secret[len(prefix) :].strip("-")
+    return secret
+
+
+def is_known_shared_external_cluster_secret(value: str) -> bool:
+    """True for ITS-defined shared QE cluster secrets (exact suffix, not spoofable prefixes)."""
+    if not is_external_cluster_source(value):
+        return False
+    suffix = _external_kubeconfig_secret_suffix(value)
+    return bool(suffix) and _KNOWN_POOLED_EXTERNAL_SUFFIX_RE.fullmatch(suffix) is not None
+
+
+def is_pooled_external_cluster_source(value: str) -> bool:
+    """True when pipeline marks a shared external cluster as pooled (not personal).
+
+    Classification is pipeline-controlled via CLUSTER_POOL_MARKER env var, not derived
+    from external Secret name. This prevents personal/user-provided clusters from
+    receiving pooled-only gate skips. Requires both marker AND cluster-prep flag.
+    """
+    if not is_external_cluster_source(value):
+        return False
+    # Environment flag marks whether cluster prep runs in dep operators (shared infrastructure).
+    if (os.environ.get("RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS") or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return False
+    # Pipeline-controlled marker explicitly designates a pooled cluster (not spoofable by secret name).
+    return (os.environ.get("CLUSTER_POOL_MARKER") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def external_kubeconfig_secret_name(value: str) -> str:
-    """Return tenant Secret name for external clusters; empty for EaaS or unset."""
+    """Return tenant Secret name for external clusters; empty for EPHC or unset."""
     text = (value or "").strip()
     return text if is_external_cluster_source(text) else ""
 
@@ -46,18 +96,18 @@ def resolve_cluster_source_for_trigger(*, product: str, external_secret: str) ->
     if secret:
         return secret
     if (product or "").strip().lower() in ("rhoai", "odh"):
-        return CLUSTER_SOURCE_EAAS
+        return CLUSTER_SOURCE_EPHC
     return ""
 
 
 def validate_cluster_source(value: str) -> None:
     """Reject invalid CLUSTER_SOURCE before oc apply."""
     text = (value or "").strip()
-    if not text or text == CLUSTER_SOURCE_EAAS:
+    if not text or is_ephemeral_hosted_cluster_source(text):
         return
     if not _SECRET_NAME_RE.fullmatch(text):
         raise ValueError(
-            f"CLUSTER_SOURCE must be {CLUSTER_SOURCE_EAAS!r} or a valid Kubernetes Secret name; got {text!r}"
+            f"CLUSTER_SOURCE must be {CLUSTER_SOURCE_EPHC!r} or a valid Kubernetes Secret name; got {text!r}"
         )
 
 
@@ -107,7 +157,7 @@ def resolve_rhoai_version_display(
 ) -> str:
     prod = (product or "").strip().lower()
     if prod != "rhoai":
-        return NOT_APPLICABLE if prod == "existing" else ""
+        return NOT_APPLICABLE if is_test_only_product(prod) else ""
     app_label = rhoai_version_label_from_app(resolved_app)
     if app_label:
         return app_label if explicit_cli else with_default_suffix(app_label, explicit=False)
@@ -143,15 +193,15 @@ def resolve_ocp_version_display(
             return with_default_suffix(catalog_ocp, explicit=False)
         return NOT_APPLICABLE
 
-    if prod == "existing" and source != CLUSTER_SOURCE_EAAS:
+    if is_test_only_product(prod) and not is_ephemeral_hosted_cluster_source(source):
         if catalog_ocp:
             return with_default_suffix(catalog_ocp, explicit=False)
         return NOT_APPLICABLE
 
-    if prod not in ("rhoai", "odh") and source != CLUSTER_SOURCE_EAAS:
+    if prod not in ("rhoai", "odh") and not is_ephemeral_hosted_cluster_source(source):
         return NOT_APPLICABLE
 
-    if source == CLUSTER_SOURCE_EAAS or prod in ("rhoai", "odh"):
+    if is_ephemeral_hosted_cluster_source(source) or prod in ("rhoai", "odh"):
         return f"latest{DEFAULT_SUFFIX}"
     return NOT_APPLICABLE
 

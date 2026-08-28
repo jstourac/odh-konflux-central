@@ -4,7 +4,7 @@
 Single run (default): set ARTIFACT_PREFIX and optional PYTEST_MARKER / TESTS_SUBDIR.
 
 Full BVT health suite: set BVT_SUITE=health to run cluster_health then operator_health
-(or placeholder JUnit when PRODUCT=existing without external kubeconfig). Used by
+(or placeholder JUnit when test-only PRODUCT without external kubeconfig). Used by
 task-bvt-health-checks.
 
 Env (required for single run):
@@ -277,7 +277,7 @@ def _run_with_tee(
 
 
 def _ensure_pytest_kubeconfig_auth() -> None:
-    """Refresh bearer token after writable kubeconfig copy (EaaS current_client_token parity)."""
+    """Refresh bearer token after writable kubeconfig copy (EPHC current_client_token parity)."""
     artifacts_path = os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts"
     os.environ.setdefault("ARTIFACTS_DIR", artifacts_path)
     prepare_kubeconfig_auth_for_tests()
@@ -492,16 +492,10 @@ def run_single(*, extra_env: dict[str, str] | None = None) -> int:
 
 
 def _prepare_bvt_oc() -> None:
-    """Stage oc under tests-payload/.tools/bin and prepend PATH (Jenkins / external BVT parity)."""
-    artifacts_path = Path(os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts")
-    os.environ.setdefault("ARTIFACTS_DIR", str(artifacts_path))
-    from runners.orchestrator import stage_oc_for_pytest
-    from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_bin_dir
+    """Stage oc under tests-payload/.tools/bin and set OC_BINARY_PATH for pytest."""
+    from runners.orchestrator import prepare_oc_binary_path_for_pytest
 
-    stage_oc_for_pytest()
-    tools_bin = tests_payload_tools_bin_dir(resolve_tests_payload_root(artifacts_path))
-    if tools_bin.is_dir():
-        os.environ["PATH"] = f"{tools_bin}:{os.environ.get('PATH', '')}"
+    prepare_oc_binary_path_for_pytest()
 
 
 def _cluster_has_odh_apis() -> bool:
@@ -536,7 +530,9 @@ def run_health_suite() -> int:
     _prepare_bvt_oc()
     external = is_external_cluster_source(os.environ.get("CLUSTER_SOURCE", ""))
     product = os.environ.get("PRODUCT", "").strip().lower()
-    if product in ("", "existing") and (not external or not _cluster_has_odh_apis()):
+    from suite.constants import is_test_only_product
+
+    if is_test_only_product(product) and (not external or not _cluster_has_odh_apis()):
         artifacts = os.environ.get("ARTIFACTS_DIR", "/artifacts").strip() or "/artifacts"
         sys.argv = [sys.argv[0], artifacts]
         from runners.bvt_product_existing_placeholder_junit import main as placeholder
@@ -556,6 +552,12 @@ def run_health_suite() -> int:
         return run_single()
 
     try:
+        from steps.prepare_bvt_cluster_nodes import prepare_bvt_cluster_nodes
+
+        nodes_ec = prepare_bvt_cluster_nodes()
+        if nodes_ec != 0:
+            return nodes_ec
+
         ec = _run_marker("cluster_health", "cluster-health", "tests/cluster_health")
         if ec != 0:
             worst = ec if worst == 0 else max(worst, ec)

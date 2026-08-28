@@ -17,7 +17,7 @@ def ensure_external_cluster_hcp_registry_prep() -> None:
         print("Not HyperShift-managed; skipping external HCP registry prep")
         return
     quay_path = os.environ.get("QUAY_PULL_SECRET_PATH", "/var/secret/quay/.dockerconfigjson").strip()
-    product = os.environ.get("PRODUCT", "").strip() or "existing"
+    product = os.environ.get("PRODUCT", "").strip()
     quay = None
     if Path(quay_path).is_file():
         quay = json.loads(Path(quay_path).read_text(encoding="utf-8"))

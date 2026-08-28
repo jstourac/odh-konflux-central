@@ -206,5 +206,76 @@ class PrepareBvtAppsNamespaceTest(unittest.TestCase):
             self.assertEqual(patched[2], "maas-api-key-cleanup")
             self.assertIn('"suspend": false', patched[-1])
 
+
+class _Clock:
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.t = start
+
+    def time(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
+class WaitDashboardPodsReadyForBvtTest(unittest.TestCase):
+    def test_waits_until_dashboard_pod_running(self) -> None:
+        from steps.prepare_bvt_apps_namespace import wait_dashboard_pods_ready_for_bvt
+
+        pending = {
+            "items": [
+                {
+                    "metadata": {"name": "rhods-dashboard-abc"},
+                    "status": {"phase": "Pending"},
+                }
+            ]
+        }
+        running = {
+            "items": [
+                {
+                    "metadata": {"name": "rhods-dashboard-abc"},
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [{"ready": True}],
+                    },
+                }
+            ]
+        }
+        payloads = iter([pending, running])
+
+        def _oc_run(args, **kwargs):
+            return type("R", (), {"returncode": 0, "stdout": json.dumps(next(payloads)), "stderr": ""})()
+
+        clock = _Clock()
+        with patch("steps.prepare_bvt_apps_namespace.time.time", clock.time):
+            with patch("steps.prepare_bvt_apps_namespace.time.sleep", clock.sleep):
+                with patch("steps.prepare_bvt_apps_namespace.oc_run", side_effect=_oc_run):
+                    wait_dashboard_pods_ready_for_bvt(timeout_sec=60)
+
+    def test_times_out_when_dashboard_stays_pending(self) -> None:
+        from steps.prepare_bvt_apps_namespace import wait_dashboard_pods_ready_for_bvt
+
+        pending = {
+            "items": [
+                {
+                    "metadata": {"name": "rhods-dashboard-abc"},
+                    "status": {"phase": "Pending"},
+                }
+            ]
+        }
+
+        def _oc_run(args, **kwargs):
+            return type("R", (), {"returncode": 0, "stdout": json.dumps(pending), "stderr": ""})()
+
+        clock = _Clock()
+        with patch("steps.prepare_bvt_apps_namespace.time.time", clock.time):
+            with patch("steps.prepare_bvt_apps_namespace.time.sleep", clock.sleep):
+                with patch("steps.prepare_bvt_apps_namespace.oc_run", side_effect=_oc_run):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        wait_dashboard_pods_ready_for_bvt(timeout_sec=25)
+        self.assertIn("rhods-dashboard", str(ctx.exception))
+        self.assertIn("Pending", str(ctx.exception))
+
+
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

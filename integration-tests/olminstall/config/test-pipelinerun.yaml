@@ -43,12 +43,12 @@ spec:
       value: rhods-operator
     - name: OLMINSTALL_REPO_URL
       value: https://gitlab.cee.redhat.com/data-hub/olminstall.git
-    # ODH uses a different pull-secret name; the pipeline default is rhoai-quay-secret
+    # ODH uses a different pull-secret name; the pipeline default is rhoai-external-quay-secret
     - name: QUAY_PULL_SECRET_NAME
       value: odh-quay-secret
     - name: TEST_GATES
       value: bvt,smoke
-    # External cluster (skip EaaS): create Secret first, then uncomment:
+    # External cluster (skip EPHC): create Secret first, then uncomment:
     #   oc create secret generic my-olminstall-kubeconfig \
     #     --from-file=kubeconfig=$HOME/.kube/my-cluster -n rhoai-tenant
     # - name: CLUSTER_SOURCE

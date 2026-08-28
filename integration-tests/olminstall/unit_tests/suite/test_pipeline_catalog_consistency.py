@@ -363,5 +363,25 @@ class PipelineCatalogConsistencyTest(unittest.TestCase):
             f"{_TEKTON_TASK_RESULTS_BUDGET_BYTES}B Tekton task limit",
         )
 
+    def test_ephemeral_path_uses_openshift_ci_provision(self) -> None:
+        text = _PIPELINE.read_text(encoding="utf-8")
+        self.assertIn("tasks/provision-ephemeral-cluster/0.1/", text)
+        self.assertIn("hypershift-hostedcluster-workflow", text)
+        self.assertNotIn("ephc-create-ephemeral-cluster-hypershift-aws", text)
+        self.assertNotIn("task-ephc-provision-space.yaml", text)
+        self.assertIn("provision-ephemeral-cluster", self.task_names)
+        self.assertIn("resolve-oci-releases", self.task_names)
+        self.assertIn("stage-ephemeral-kubeconfig", self.task_names)
+        self.assertNotIn("install-ocp-cluster", self.task_names)
+        self.assertIn("OCP_RELEASE_CHANNEL", text)
+        self.assertIn("aws-konflux-prod", text)
+        self.assertIn("secretName: vault-approle", text)
+        self.assertIn("name: tenant-test-secrets", text)
+        self.assertIn("hosted-mgmt2", text)
+        self.assertIn("HYPERSHIFT_NODE_COUNT", text)
+        self.assertIn("OCI_TASKS_REVISION", text)
+        self.assertIn("9751a2028f2b3b88e4204d5c42de8eda4ebb466f", text)
+        self.assertNotIn("provision-ephc-space", self.task_names)
+
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

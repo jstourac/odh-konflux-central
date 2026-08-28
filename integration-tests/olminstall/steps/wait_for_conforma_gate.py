@@ -68,7 +68,9 @@ def _write_conforma_task_message(
 
 
 def _product_is_existing(product: str) -> bool:
-    return (product or "").strip().lower() == "existing"
+    from suite.constants import is_test_only_product
+
+    return is_test_only_product(product)
 
 
 def _sidecar_path() -> Path | None:

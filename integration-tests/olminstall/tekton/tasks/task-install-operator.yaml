@@ -104,12 +104,12 @@ spec:
         tls = os.environ.get("TLS_WORKAROUND", "").strip().lower() in ("1", "true", "yes")
         git_clone(os.environ["REPO_URL"], os.environ["REPO_REV"], os.environ["DEST_DIR"], tls_workaround=tls)
 
-    - name: prepare-kubeconfig-eaas
-      displayName: Stage EaaS kubeconfig
+    - name: prepare-kubeconfig-ephc
+      displayName: Stage EPHC kubeconfig
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: in
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
       volumeMounts:
         - name: credentials
@@ -122,18 +122,18 @@ spec:
         set -euo pipefail
         src="${TESTS_SHARED}/credentials/kubeconfig"
         if [[ ! -f "${src}" ]]; then
-          echo "ERROR: EaaS kubeconfig missing at ${src} (expected install-ocp-cluster to stage it)" >&2
+          echo "ERROR: EPHC kubeconfig missing at ${src} (expected stage-ephemeral-kubeconfig to stage it)" >&2
           exit 1
         fi
         cp "${src}" /credentials/kubeconfig
-        echo "EaaS kubeconfig staged at /credentials/kubeconfig (from tests-shared)"
+        echo "EPHC kubeconfig staged at /credentials/kubeconfig (from tests-shared)"
 
     - name: prepare-kubeconfig-external
       displayName: Load external kubeconfig
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: notin
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
       volumeMounts:
         - name: credentials

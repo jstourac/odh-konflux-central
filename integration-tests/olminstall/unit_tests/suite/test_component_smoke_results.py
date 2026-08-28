@@ -35,7 +35,7 @@ class ComponentSmokeResultsTest(unittest.TestCase):
                 "REPO_ROOT": str(repo),
                 "RESULTS_DIR": str(results),
                 "TEKTON_RESULTS_DIR": str(results),
-                "PRODUCT": "existing",
+                "PRODUCT": "",
                 "CLUSTER_SOURCE": "external-kubeconfig-secret",
                 "TEST_GATES": "smoke",
                 "COMPONENTS": "ai_pipelines",

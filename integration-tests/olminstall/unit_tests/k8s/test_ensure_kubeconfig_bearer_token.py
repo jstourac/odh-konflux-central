@@ -1,4 +1,4 @@
-"""Tests for ensure_kubeconfig_bearer_token (EaaS exec-auth kubeconfig → pytest token)."""
+"""Tests for ensure_kubeconfig_bearer_token (EPHC exec-auth kubeconfig → pytest token)."""
 
 from __future__ import annotations
 
@@ -163,13 +163,13 @@ class EnsureKubeconfigBearerTokenTests(unittest.TestCase):
                         "users:",
                         "  - name: u",
                         "    user:",
-                        "      token: stale-eaas-token",
+                        "      token: stale-ephc-token",
                     ]
                 )
                 + "\n",
                 encoding="utf-8",
             )
-            env = {"KUBECONFIG": str(kc), "ARTIFACTS_DIR": tmp, "CLUSTER_SOURCE": "EAAS"}
+            env = {"KUBECONFIG": str(kc), "ARTIFACTS_DIR": tmp, "CLUSTER_SOURCE": "EPHC"}
             whoami_t = mock.Mock(returncode=0, stdout="\n")
             whoami = mock.Mock(returncode=0, stdout="kube:admin\n")
             create_token = mock.Mock(returncode=0, stdout="fresh-minted\n")
@@ -194,7 +194,7 @@ class EnsureKubeconfigBearerTokenTests(unittest.TestCase):
             self.assertEqual(tekton_util._kubeconfig_bearer_token(Path(env["KUBECONFIG"])), "fresh-minted")
             self.assertEqual(env.get("OPENSHIFT_TOKEN"), "fresh-minted")
 
-    def test_mints_on_eaas_when_whoami_t_returns_stale_embedded_token(self) -> None:
+    def test_mints_on_ephc_when_whoami_t_returns_stale_embedded_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             kc = Path(tmp) / "kc"
             kc.write_text(
@@ -209,15 +209,15 @@ class EnsureKubeconfigBearerTokenTests(unittest.TestCase):
                         "users:",
                         "  - name: u",
                         "    user:",
-                        "      token: stale-eaas-token",
+                        "      token: stale-ephc-token",
                     ]
                 ),
                 encoding="utf-8",
             )
-            env = {"KUBECONFIG": str(kc), "ARTIFACTS_DIR": tmp, "CLUSTER_SOURCE": "EAAS"}
-            whoami_t = mock.Mock(returncode=0, stdout="stale-eaas-token\n")
+            env = {"KUBECONFIG": str(kc), "ARTIFACTS_DIR": tmp, "CLUSTER_SOURCE": "EPHC"}
+            whoami_t = mock.Mock(returncode=0, stdout="stale-ephc-token\n")
             whoami = mock.Mock(returncode=0, stdout="kube:admin\n")
-            create_token = mock.Mock(returncode=0, stdout="eaas-fresh-mint\n")
+            create_token = mock.Mock(returncode=0, stdout="ephc-fresh-mint\n")
 
             def run_side_effect(cmd, **kwargs):
                 if cmd[-2:] == ["whoami", "-t"]:
@@ -236,8 +236,8 @@ class EnsureKubeconfigBearerTokenTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(tekton_util, "_ensure_olminstall_cluster_admin_sa", return_value=True))
                 stack.enter_context(mock.patch.object(tekton_util, "_token_has_cluster_admin", return_value=True))
                 tekton_util.ensure_kubeconfig_bearer_token(env)
-            self.assertEqual(tekton_util._kubeconfig_bearer_token(Path(env["KUBECONFIG"])), "eaas-fresh-mint")
-            self.assertEqual(env.get("OPENSHIFT_TOKEN"), "eaas-fresh-mint")
+            self.assertEqual(tekton_util._kubeconfig_bearer_token(Path(env["KUBECONFIG"])), "ephc-fresh-mint")
+            self.assertEqual(env.get("OPENSHIFT_TOKEN"), "ephc-fresh-mint")
 
     def test_materializes_minted_token_when_token_post_check_fails_but_admin_mint_trusted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -262,7 +262,7 @@ class EnsureKubeconfigBearerTokenTests(unittest.TestCase):
             )
             admin_kc = Path(tmp) / "admin-kc"
             admin_kc.write_text(kc.read_text(encoding="utf-8"), encoding="utf-8")
-            env = {"KUBECONFIG": str(kc), "ARTIFACTS_DIR": tmp, "CLUSTER_SOURCE": "EAAS"}
+            env = {"KUBECONFIG": str(kc), "ARTIFACTS_DIR": tmp, "CLUSTER_SOURCE": "EPHC"}
             whoami_t = mock.Mock(returncode=0, stdout="\n")
             whoami = mock.Mock(returncode=0, stdout="kube:admin\n")
             create_token = mock.Mock(returncode=0, stdout="minted-token\n")

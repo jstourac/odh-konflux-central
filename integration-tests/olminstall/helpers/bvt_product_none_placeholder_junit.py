@@ -9,7 +9,7 @@ from pathlib import Path
 
 _SKIP = (
     "PRODUCT=none: full opendatahub-tests BVT needs a cluster with Open Data Hub APIs "
-    "(e.g. DataScienceCluster). Use PRODUCT rhoai or odh for EaaS-backed BVT."
+    "(e.g. DataScienceCluster). Use PRODUCT rhoai or odh for EPHC-backed BVT."
 )
 
 _ARTIFACTS_ROOT = Path("/artifacts").resolve()

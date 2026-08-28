@@ -1,4 +1,4 @@
-"""OCP version / EaaS supported-minors helpers mixin for OLMInstallRunner."""
+"""OCP version / EPHC supported-minors helpers mixin for OLMInstallRunner."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import sys
 from typing import Any
 from urllib.parse import quote
 
+from runners.report.pipelinerun_summary import task_result
 from suite.constants import LIST_SUPPORTED_OCP_MAX_PRS
 from suite.errors import AppError
 from k8s.oc_util import parse_json_output, run_cmd
@@ -129,7 +130,7 @@ class RunnerOcpMixin:
 
     def _fetch_install_ocp_cluster_supported_log(self, pr_name: str, source: str) -> str:
         out = ""
-        for pipeline_task in ("install-ocp-cluster", "provision-cluster"):
+        for pipeline_task in ("stage-ephemeral-kubeconfig", "install-ocp-cluster", "provision-cluster"):
             if source == "live":
                 out = self._fetch_step_log_live(pr_name, pipeline_task, "step-get-supported-versions")
             if (not out or not out.strip()) and self.ka_available():
@@ -142,6 +143,58 @@ class RunnerOcpMixin:
                 break
         return out
 
+    def _taskruns_for_pipelinerun(self, pr_name: str, source: str) -> list[dict[str, Any]]:
+        if source == "live":
+            proc = run_cmd(
+                [
+                    "oc",
+                    "get",
+                    "taskrun",
+                    "-n",
+                    self.args.namespace,
+                    "-l",
+                    f"tekton.dev/pipelineRun={pr_name}",
+                    "-o",
+                    "json",
+                ],
+                capture=True,
+                check=False,
+                timeout=90,
+            )
+            if proc.returncode != 0 or not (proc.stdout or "").strip():
+                return []
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                return []
+            items = data.get("items")
+            if not isinstance(items, list):
+                return []
+            return [x for x in items if isinstance(x, dict)]
+        if not self.ka_available():
+            return []
+        sel = f"tekton.dev/pipelineRun={pr_name}"
+        data = self._ka_get_json_warn_empty(
+            f"/apis/tekton.dev/v1/namespaces/{quote(self.args.namespace)}/taskruns?labelSelector={quote(sel)}",
+            ctx=f"archived TaskRuns for PipelineRun {pr_name}",
+        )
+        items = data.get("items")
+        if not isinstance(items, list):
+            return []
+        return [x for x in items if isinstance(x, dict)]
+
+    def _fetch_ephc_supported_versions(self, pr_name: str, source: str) -> list[str] | None:
+        log_text = self._fetch_install_ocp_cluster_supported_log(pr_name, source)
+        versions = self._parse_supported_versions_line(log_text)
+        if versions:
+            return versions
+        taskruns = self._taskruns_for_pipelinerun(pr_name, source)
+        for pipeline_task in ("resolve-oci-releases", "stage-ephemeral-kubeconfig"):
+            minor = task_result(taskruns, pipeline_task, "ocpMinor").strip()
+            if minor:
+                return [minor]
+        return None
+
     def _validate_ocp_version_in_supported_list(self, versions: list[str]) -> None:
         want = (self.args.ocp_version or "").strip()
         if not want:
@@ -150,7 +203,7 @@ class RunnerOcpMixin:
             print(f"\n--ocp-version {want!r} is in the supported list above.")
             return
         raise AppError(
-            f"--ocp-version {want!r} is not in the EaaS-supported minors from this log snapshot: {versions}. "
+            f"--ocp-version {want!r} is not in the EPHC-supported minors from this log snapshot: {versions}. "
             "Choose a minor from the list, or drop --list-supported-ocp to trigger a run without this check.",
             2,
         )
@@ -158,7 +211,7 @@ class RunnerOcpMixin:
     def list_supported_ocp(self) -> None:
         merged = self._merged_pipelinerun_rows(LIST_SUPPORTED_OCP_MAX_PRS, olminstall_family_only=True)
         print(
-            f"EaaS-supported OpenShift minors (from get-supported-versions step logs), "
+            f"EPHC-supported OpenShift minors (from pipeline task results or step logs), "
             f"app={self.args.app!r} namespace={self.args.namespace!r}, "
             f"scanning up to {LIST_SUPPORTED_OCP_MAX_PRS} newest olminstall PipelineRun(s):"
         )
@@ -176,8 +229,7 @@ class RunnerOcpMixin:
             raise AppError("No candidate PipelineRuns to scan", 1)
 
         for row in merged:
-            log_text = self._fetch_install_ocp_cluster_supported_log(row.name, row.source)
-            versions = self._parse_supported_versions_line(log_text)
+            versions = self._fetch_ephc_supported_versions(row.name, row.source)
             if versions:
                 print("")
                 print("Supported minors (newest first):")
@@ -189,9 +241,10 @@ class RunnerOcpMixin:
                 return
 
         raise AppError(
-            "Could not read 'Supported versions:' from install-ocp-cluster step-get-supported-versions logs "
+            "Could not read EPHC-supported OpenShift minors from resolve-oci-releases / "
+            "stage-ephemeral-kubeconfig task results or legacy get-supported-versions logs "
             f"for any of {len(merged)} scanned run(s). "
-            "The step may not have run yet, logs may be rotated, or the task name may differ — "
+            "The tasks may not have run yet, logs may be rotated, or the task name may differ — "
             "try -l and watch a fresh run, or confirm KubeArchive (--ka-host).",
             1,
         )

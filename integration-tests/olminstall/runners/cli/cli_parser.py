@@ -17,9 +17,10 @@ from suite.constants import (
     DEFAULT_LIST_COUNT,
     DEFAULT_NAMESPACE,
     DEFAULT_PRODUCT,
+    DEFAULT_QUAY_PULL_SECRET_NAME,
     DEFAULT_TESTS_CONFIG_RELATIVE,
     LIST_SUPPORTED_OCP_MAX_PRS,
-    PRODUCT_CHOICES,
+    PRODUCT_INSTALL_CHOICES,
 )
 
 # When user passes ``--ka-host`` with no URL, read KA_HOST from the environment.
@@ -76,28 +77,29 @@ class CliArgumentParser(argparse.ArgumentParser):
 def _add_product_group(parser: CliArgumentParser) -> None:
     product = parser.add_argument_group(
         "product & catalog",
-        "RHOAI/ODH deploy: product, FBC image, channel, EaaS OCP version, and supported-OCP query (trigger or --list-supported-ocp).",
+        "RHOAI/ODH deploy: product, FBC image, channel, EPHC OCP version, and supported-OCP query (trigger or --list-supported-ocp).",
     )
     product.add_argument(
         "--image",
         default="",
         metavar="REF",
-        help="FBC/catalog image. Empty = resolve from Konflux for --product rhoai/odh; omitted for existing.",
+        help="FBC/catalog image. Empty = resolve from Konflux for --product rhoai/odh; omitted for test-only.",
     )
     product.add_argument(
         "--product",
         default=DEFAULT_PRODUCT,
-        choices=PRODUCT_CHOICES,
+        metavar="NAME",
+        choices=sorted(PRODUCT_INSTALL_CHOICES),
         help=(
-            "existing: tests on a cluster with RHOAI already installed (skip EaaS/install and FBC "
-            "snapshot extract). rhoai or odh: catalog wiring and auto image resolution for full installs."
+            "Omit for test-only on an external cluster (skip EPHC/install and FBC snapshot extract). "
+            "rhoai or odh: catalog wiring and auto image resolution for full installs."
         ),
     )
     product.add_argument(
         "--install-dependencies",
         action="store_true",
         help=(
-            "With --product existing: run install-dep-operators (setup-dependencies.sh, RHCL, "
+            "Test-only (omit --product): run install-dep-operators (setup-dependencies.sh, RHCL, "
             "cluster prep) before component tests instead of prepare-components-prerequisites."
         ),
     )
@@ -112,19 +114,32 @@ def _add_product_group(parser: CliArgumentParser) -> None:
         ),
     )
     product.add_argument(
-        "--channel",
+        "--rhoai-channel",
+        dest="channel",
         metavar="NAME",
         default="",
-        help="OLM UPDATE_CHANNEL passed to the ITS (e.g. stable-3.x, odh-stable).",
+        help="OLM UPDATE_CHANNEL passed to the ITS (e.g. stable-3.x, odh-stable, beta).",
     )
     product.add_argument(
         "--ocp-version",
         metavar="X.Y",
         default="",
         help=(
-            "OCP cluster minor (e.g. 4.21): EaaS provisions that version; with --product rhoai selects "
-            "rhoai-fbc-fragment-ocp-4XX from Konflux. External kubeconfig: optional override "
+            "OCP cluster minor (e.g. 4.21 or 5.0): ephemeral provision uses that version. "
+            "With --product rhoai, OCP 4.x also selects rhoai-fbc-fragment-ocp-4XX; OCP 5.x "
+            "keeps the ITS FBC (no ocp-5XX fragment). External kubeconfig: optional override "
             "(auto-detected when omitted). With --list-supported-ocp, assert minor is listed."
+        ),
+    )
+    product.add_argument(
+        "--ocp-channel",
+        dest="ocp_channel",
+        metavar="KIND",
+        default="",
+        choices=("stable", "candidate", "nightly"),
+        help=(
+            "OpenShift CI payload stream for provision-ephemeral-cluster: stable (GA, default), "
+            "candidate (EC), or nightly. Independent of --rhoai-channel (OLM)."
         ),
     )
     product.add_argument(
@@ -167,7 +182,7 @@ def _add_tests_group(parser: CliArgumentParser) -> None:
         default="",
         help=(
             "Override installed CSV for opendatahub-tests image tag and component version gates. "
-            "Use with --product existing on external clusters (optional)."
+            "Use on external test-only runs (omit --product) (optional)."
         ),
     )
     tests.add_argument(
@@ -176,7 +191,23 @@ def _add_tests_group(parser: CliArgumentParser) -> None:
         default=None,
         help=(
             "Comma-separated smoke component ids (olminstall-components-smoke.yaml). "
-            "Only when --tests includes smoke. Omit = all catalog components."
+            "Only when --tests includes smoke. Omit or ``all`` = every enabled catalog id. "
+            "Use --list-components to see available IDs."
+        ),
+    )
+    tests.add_argument(
+        "--list-components",
+        action="store_true",
+        help="Print the table of available smoke components and descriptions.",
+    )
+    tests.add_argument(
+        "--secret-source",
+        choices=("vault", "tenant"),
+        default=os.environ.get("OLMINSTALL_SECRET_SOURCE", "vault").strip() or "vault",
+        help=(
+            "Where component tests load Jenkins envFile* credentials: "
+            "vault (AppRole + apps/rhods-ci/shift-left at runtime, default) or "
+            "tenant (cloned Konflux Secrets). Env: OLMINSTALL_SECRET_SOURCE."
         ),
     )
     tests.add_argument(
@@ -190,16 +221,34 @@ def _add_tests_group(parser: CliArgumentParser) -> None:
     )
 
 
+def _parse_cleanup_cli_value(raw: str) -> bool:
+    text = (raw or "").strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    raise argparse.ArgumentTypeError("--cleanup must be true or false (or omit the value for true)")
+
+
 def _add_external_group(parser: CliArgumentParser) -> None:
     external = parser.add_argument_group(
         "external cluster",
-        "Skip EaaS; run install/BVT/smoke on a pre-existing cluster (trigger only).",
+        "Skip EPHC; run install/BVT/smoke on a pre-existing cluster (trigger only).",
     )
     external.add_argument(
         "--external-kubeconfig",
         metavar="PATH",
         default=os.environ.get("OLMINSTALL_EXTERNAL_KUBECONFIG", ""),
         help="Upload local kubeconfig as a tenant Secret (key kubeconfig). Env: OLMINSTALL_EXTERNAL_KUBECONFIG.",
+    )
+    external.add_argument(
+        "--external-kubeconfig-context",
+        metavar="NAME",
+        default=os.environ.get("OLMINSTALL_EXTERNAL_KUBECONFIG_CONTEXT", ""),
+        help=(
+            "Kubeconfig context to upload for --external-kubeconfig (default: auto-select cluster-admin "
+            "when current context is limited). Env: OLMINSTALL_EXTERNAL_KUBECONFIG_CONTEXT."
+        ),
     )
     external.add_argument(
         "--external-kubeconfig-secret",
@@ -209,19 +258,24 @@ def _add_external_group(parser: CliArgumentParser) -> None:
     )
     external.add_argument(
         "--cleanup",
-        action="store_true",
+        nargs="?",
+        const="true",
+        type=_parse_cleanup_cli_value,
+        metavar="true|false",
+        default=None,
         help=(
-            "Set CLEANUP=true: run olminstall cleanup.sh -t operator on the external cluster before "
-            "install (requires --external-kubeconfig or --external-kubeconfig-secret). "
-            "Destructive; disposable clusters only."
+            "Maintenance: --cleanup or --cleanup true runs olminstall cleanup.sh -t operator locally "
+            "(requires --external-kubeconfig or --external-kubeconfig-secret; does not trigger a "
+            "PipelineRun). On a trigger run, only --cleanup false opts out of inferred pipeline "
+            "CLEANUP (rhoai/odh). Destructive."
         ),
     )
     external.add_argument(
         "--force-cluster-run",
         action="store_true",
         help=(
-            "Skip external-cluster single-flight wait/check and allow parallel olminstall runs on "
-            "the same physical cluster (EAAS unchanged). Default: wait until the cluster is idle."
+            "Skip external-cluster single-flight wait/check in external-cluster-ready and allow "
+            "parallel olminstall runs on the same physical cluster (EPHC unchanged)."
         ),
     )
 
@@ -371,6 +425,16 @@ def _add_konflux_group(parser: CliArgumentParser) -> None:
         metavar="REF",
         default="",
         help="Git revision for --konflux-repo (branch, tag, or SHA). Omit = main from ITS YAML.",
+    )
+    konflux.add_argument(
+        "--quay-pull-secret-name",
+        dest="quay_pull_secret_name",
+        metavar="NAME",
+        default=DEFAULT_QUAY_PULL_SECRET_NAME,
+        help=(
+            "QUAY_PULL_SECRET_NAME for rhoai/odh image pulls (Catalog/Operator/sidecars). "
+            "Omit = pipeline default; ITS param wins unless this flag is passed."
+        ),
     )
 
 

@@ -222,6 +222,8 @@ def resolve_managed_dsc_keys(
 
     if for_install and operator_version.strip():
         managed -= _install_removed_for_version(operator_version, policy)
+    if "ogx" in ids and "llama_stack" not in ids:
+        managed.discard("llamastackoperator")
     return managed
 
 

@@ -15,7 +15,11 @@ from _bootstrap import ensure_olminstall_path
 
 ensure_olminstall_path()
 
-from suite.component_task_exit import component_from_plan, resolve_component_exit_codes
+from suite.component_task_exit import (
+    component_exit_file_path,
+    component_from_plan,
+    resolve_component_exit_codes,
+)
 from suite.dsc_baseline import finalize_component_dsc_hygiene
 from steps.tekton_util import require_env
 
@@ -38,11 +42,33 @@ def _component_test_output_published() -> bool:
     return isinstance(obj, dict) and str(obj.get("result", "")).strip()
 
 
+def _tekton_exit_from_test_output() -> int | None:
+    """When summarize published FAILURE with zero passes, fail Tekton regardless of stale exit file."""
+    raw = os.environ.get("TEST_OUTPUT_PATH", "").strip()
+    if not raw or "$(" in raw:
+        return None
+    path = Path(raw)
+    if not path.is_file():
+        return None
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    result = str(obj.get("result", "")).strip().upper()
+    successes = int(obj.get("successes", 0) or 0)
+    failures = int(obj.get("failures", 0) or 0)
+    if result == "FAILURE" and successes == 0 and failures > 0:
+        return 1
+    return None
+
+
 def main() -> int:
     artifacts_dir = Path(require_env("ARTIFACTS_DIR"))
     component_id = require_env("COMPONENT_ID")
     plan_path = Path(require_env("COMPONENT_TEST_PLAN_JSON"))
-    exit_path = artifacts_dir / "component-test.exit"
+    exit_path = component_exit_file_path(artifacts_dir, component_id)
     raw_ec = 1  # missing marker => treat as failure until proven otherwise
     if exit_path.is_file():
         try:
@@ -60,6 +86,10 @@ def main() -> int:
         raw_ec=raw_ec,
         artifacts_dir=artifacts_dir,
     )
+    forced = _tekton_exit_from_test_output()
+    if forced is not None:
+        tekton_ec = max(tekton_ec, forced)
+        strict_ec = max(strict_ec, forced)
     drifts = finalize_component_dsc_hygiene(component_id, artifacts_dir)
     if drifts:
         print(

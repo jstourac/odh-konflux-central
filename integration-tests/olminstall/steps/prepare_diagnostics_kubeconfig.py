@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Resolve target-cluster kubeconfig for collect-diagnostics (EaaS or external).
+"""Resolve target-cluster kubeconfig for collect-diagnostics (EPHC or external).
 
 Writes a Tekton result ``KUBECONFIG_PATH`` (absolute path) for the collect step.
 
 Env:
     CLUSTER_SOURCE  -- tenant Secret name with key ``kubeconfig`` (external cluster)
     TESTS_SHARED_KUBECONFIG       -- kubeconfig staged by opendatahub-tests-prepare (preferred)
-    EAAS_KUBECONFIG_REL         -- filename under ``/credentials`` from get-kubeconfig (EaaS)
+    EPHC_KUBECONFIG_REL         -- filename under ``/credentials`` from get-kubeconfig (EPHC)
     KUBECONFIG_PATH_RESULT      -- Tekton result file path (required)
     NAMESPACE                   -- optional; defaults to in-cluster service account namespace
 """
@@ -71,7 +71,7 @@ def main() -> int:
         return 0
 
     external = external_kubeconfig_secret_name(os.environ.get("CLUSTER_SOURCE", ""))
-    eaas_rel = os.environ.get("EAAS_KUBECONFIG_REL", "").strip()
+    ephc_rel = (os.environ.get("EPHC_KUBECONFIG_REL") or "").strip()
     tests_shared_kubeconfig = os.environ.get("TESTS_SHARED_KUBECONFIG", "").strip()
 
     _CREDENTIALS.mkdir(parents=True, exist_ok=True)
@@ -101,15 +101,15 @@ def main() -> int:
         _KUBECONFIG.write_text(content, encoding="utf-8")
         _KUBECONFIG.chmod(0o600)
         print(f"External kubeconfig staged at {_KUBECONFIG} (secret/{external})")
-    elif eaas_rel:
-        src = _CREDENTIALS / eaas_rel
+    elif ephc_rel:
+        src = _CREDENTIALS / ephc_rel
         if not src.is_file():
-            print(f"ERROR: EaaS kubeconfig missing at {src}", file=sys.stderr)
+            print(f"ERROR: EPHC kubeconfig missing at {src}", file=sys.stderr)
             return 1
         if src.resolve() != _KUBECONFIG.resolve():
             _KUBECONFIG.write_bytes(src.read_bytes())
             _KUBECONFIG.chmod(0o600)
-        print(f"EaaS kubeconfig staged at {_KUBECONFIG} (from {eaas_rel})")
+        print(f"EPHC kubeconfig staged at {_KUBECONFIG} (from {ephc_rel})")
     elif _KUBECONFIG.is_file():
         print(f"Using existing kubeconfig at {_KUBECONFIG}")
     else:

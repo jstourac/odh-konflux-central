@@ -10,7 +10,7 @@ from install import assert_external_cluster_idle as step
 
 class AssertExternalClusterIdleStepTest(unittest.TestCase):
     def test_skips_non_external_cluster_source(self) -> None:
-        with mock.patch.dict("os.environ", {"CLUSTER_SOURCE": "EAAS"}, clear=False):
+        with mock.patch.dict("os.environ", {"CLUSTER_SOURCE": "EPHC"}, clear=False):
             self.assertEqual(step.main(), 0)
 
     def test_fails_when_wait_raises(self) -> None:

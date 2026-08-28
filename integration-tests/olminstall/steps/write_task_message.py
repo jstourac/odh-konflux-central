@@ -8,7 +8,7 @@ Runs as a Task ``finally`` step after success or failure::
 Env:
     TASK_MESSAGE_PATH  -- Tekton result file (``$(results.TASK_MESSAGE.path)``)
     PIPELINE_TASK      -- optional; pod label ``tekton.dev/pipelineTask`` (downward API)
-    SCRIPTS_REPO_ROOT  -- olminstall checkout (set per task; EaaS shallow-clones first)
+    SCRIPTS_REPO_ROOT  -- olminstall checkout (set per task; EPHC shallow-clones first)
     TEST_OUTPUT_PATH   -- optional; backfill from JUnit when summarize step failed
     ARTIFACTS_DIR, COMPONENT_ID, COMPONENT_TEST_PLAN_JSON -- component smoke fallback
 """
@@ -72,6 +72,8 @@ _RESULT_HINT_PRIORITY: tuple[str, ...] = (
     "INSTALL_STATUS",
     "OPERATOR_VERSION",
     "clusterName",
+    "ocpMinor",
+    "ocpChannel",
     "secretRef",
     "FBCF_IMAGE",
     "ARTIFACTS_URL",
@@ -346,6 +348,7 @@ def _publish_results_task_message(
     *,
     step_failed: bool = False,
     failure_detail: str = "",
+    upstream_blockers: list[str] | None = None,
 ) -> str:
     """publish-results summary: green when publish succeeded; gate lines in TASK_MESSAGE."""
     if step_failed or _publish_results_step_failed():
@@ -359,8 +362,18 @@ def _publish_results_task_message(
         head = f"{task_label}: {status_word} - {_compact(detail, limit=200)}"
         return head
 
+    blockers = [b.strip() for b in (upstream_blockers or []) if b.strip()]
     hint = _publish_gate_hint(sibling)
     head = f"{task_label}: Succeeded"
+    if blockers:
+        blocked_head = f"{head} - {'; '.join(blockers[:2])}"
+        if hint:
+            return f"{blocked_head}\n{hint}"
+        test_gates = os.environ.get("TEST_GATES", "").strip()
+        from runners.report.check_requested_gates_ran import format_install_blocked_publish_note
+
+        gate_note = format_install_blocked_publish_note(blockers, test_gates=test_gates)
+        return f"{blocked_head}\n{gate_note}" if gate_note else blocked_head
     return f"{head}\n{hint}" if hint else head
 
 
@@ -398,7 +411,7 @@ def _version_skipped_note() -> str:
 
 
 def _component_prep_track_note() -> str:
-    """Which prepare-components-prerequisites branch ran (eaas vs external)."""
+    """Which prepare-components-prerequisites branch ran (ephc vs external)."""
     from steps.component_prep_track import read_component_prep_track_note
 
     return read_component_prep_track_note()
@@ -590,9 +603,14 @@ def _finalize_publish_results() -> None:
     if tier1:
         sibling["TIER1_GATE"] = tier1
 
-    from runners.report.check_requested_gates_ran import collect_hollow_green_failures
+    from runners.report.check_requested_gates_ran import (
+        collect_hollow_green_failures,
+        format_install_blocked_publish_note,
+        upstream_blocked_test_gates,
+    )
 
     hollow_failures = collect_hollow_green_failures(gate_values=resolved_gates)
+    upstream_blockers = upstream_blocked_test_gates()
     if hollow_failures:
         step_failed = True
 
@@ -614,6 +632,15 @@ def _finalize_publish_results() -> None:
             konflux_failure_test_output_json(note=note)
         )
         failure_detail = note
+    elif upstream_blockers:
+        blocked_note = format_install_blocked_publish_note(
+            upstream_blockers,
+            test_gates=test_gates,
+        )
+        test_output = slim_test_output_for_tekton(
+            konflux_failure_test_output_json(note=blocked_note)
+        )
+        failure_detail = ""
     else:
         failure_detail = ""
     sibling["TEST_OUTPUT"] = test_output
@@ -623,6 +650,7 @@ def _finalize_publish_results() -> None:
             sibling,
             step_failed=step_failed,
             failure_detail=failure_detail,
+            upstream_blockers=upstream_blockers,
         ),
         max_bytes=_PUBLISH_RESULTS_TASK_MESSAGE_MAX_BYTES,
     )

@@ -6,13 +6,14 @@ from __future__ import annotations
 import os
 import sys
 
+from suite.constants import is_test_only_product
 from suite.rh_nightly_auto_trigger import rhoai_fbc_component_meets_min_version
 
 
 def main() -> int:
     product = os.environ.get("PRODUCT", "").strip().lower()
-    if product == "existing":
-        print("✓ PRODUCT=existing — MIN_RHOAI_VERSION gate skipped")
+    if is_test_only_product(product):
+        print("✓ test-only PRODUCT — MIN_RHOAI_VERSION gate skipped")
         return 0
     min_version = (os.environ.get("MIN_RHOAI_VERSION") or "3.5").strip() or "3.5"
     component = (os.environ.get("RHOAI_FBC_NAME") or os.environ.get("COMPONENT_NAME") or "").strip()

@@ -11,7 +11,7 @@ metadata:
     olminstall.konflux.dev/snippets: config/olminstall-pipeline-snippets.yaml (see README.md#pipeline-snippets-olminstall-pipeline-snippetsyaml)
 spec:
   description: >-
-    End-to-end (E2E) RHOAI/ODH test on Konflux: optionally provision an EaaS cluster,
+    End-to-end (E2E) RHOAI/ODH test on Konflux: optionally provision an EPHC cluster,
     install the operator from the snapshot FBC catalog image, run BVT health
     checks, then optional per-component smoke tests. Reporting and artifact
     upload run in the finally block after tests complete.
@@ -35,16 +35,16 @@ spec:
 
     - name: CLUSTER_SOURCE
       description: |
-        Target cluster selector. EAAS — provision an ephemeral cluster in-pipeline.
+        Target cluster selector. EPHC — Ephemeral Hosted Cluster in OpenShift CI (Prow).
         Any other value — tenant Secret name (key kubeconfig) for a user-provided cluster.
-        Empty with PRODUCT=existing — no cluster (snapshot-only / placeholder BVT).
+        Empty with PRODUCT unset (test-only) — no cluster (snapshot-only / placeholder BVT).
       type: string
       default: ""
 
     - name: FORCE_CLUSTER_RUN
       description: |
         When "true", skip external-cluster single-flight wait (allow parallel runs on the same
-        physical cluster). EAAS is never serialized.
+        physical cluster). EPHC is never serialized.
       type: string
       default: "false"
 
@@ -53,7 +53,7 @@ spec:
         Max seconds to wait in external-cluster-ready for another olminstall run on the same
         external cluster to finish (Jenkins resource-lock parity).
       type: string
-      default: "14100"
+      default: "21300"
 
     - name: CLUSTER_IDLE_POLL_SEC
       description: Poll interval while waiting for an external cluster to become idle.
@@ -63,43 +63,76 @@ spec:
     - name: OCP_VERSION
       description: |
         Informational catalog OCP minor for Konflux UI. Set by olm_pipeline.py on trigger.
-        "latest (default)" on EaaS when omitted; inferred from RHOAI_FBC_NAME on external runs.
+        "latest (default)" on EPHC when omitted; inferred from RHOAI_FBC_NAME on external runs.
       type: string
       default: ""
 
     - name: OCP_VERSION_PREFIX
       description: |
-        OpenShift version prefix for the ephemeral cluster (e.g. 4.20. or 4.19.). Latest patch is resolved via EaaS.
-        Leave empty to use the newest supported major.minor from the environment.
+        OpenShift minor for the ephemeral cluster (e.g. 4.21 or 4.21.). Empty uses RHOAI_FBC_NAME
+        (rhoai-fbc-fragment-ocp-421 → 4.21) for OpenShift CI provision-ephemeral-cluster.
       type: string
       default: ""
 
+    - name: OCP_RELEASE_CHANNEL
+      description: |
+        OpenShift CI payload stream for provision-ephemeral-cluster: stable (GA),
+        candidate (EC), or nightly. Independent of UPDATE_CHANNEL (RHOAI OLM).
+      type: string
+      default: "stable"
+
     - name: CLEANUP
       description: |
-        When "true" and CLUSTER_SOURCE is a tenant Secret name (not EAAS), run olminstall
+        When "true" and CLUSTER_SOURCE is a tenant Secret name (not EPHC), run olminstall
         cleanup.sh -t operator before install-operator.
       type: string
       default: "false"
 
     - name: HYPERSHIFT_INSTANCE_TYPE
-      description: AWS instance type for ephemeral HyperShift workers
+      description: AWS instance type for ephemeral HyperShift workers (COMPUTE_NODE_TYPE)
       type: string
       default: "m5.2xlarge"
 
+    - name: OCI_CLUSTER_PROFILE
+      description: |
+        OpenShift CI cluster profile for hypershift-hostedcluster-workflow.
+        Konflux shared HyperShift profile is aws-konflux-prod (EPHC deprecation notice).
+      type: string
+      default: "aws-konflux-prod"
+
+    - name: OCI_WORKFLOW
+      description: OpenShift CI workflow name for provision-ephemeral-cluster
+      type: string
+      default: "hypershift-hostedcluster-workflow"
+
+    - name: OCI_TASKS_REVISION
+      description: |
+        Pinned commit of openshift/konflux-tasks for provision-ephemeral-cluster.
+      type: string
+      # renovate: datasource=git-refs depName=https://github.com/openshift/konflux-tasks
+      default: "9751a2028f2b3b88e4204d5c42de8eda4ebb466f"
+
     - name: PRODUCT
       description: |
-        Product selector: "rhoai", "odh", or "existing".
-        When "existing", cluster provisioning and operator installation are skipped; set
+        Product selector: "rhoai" or "odh" (empty = test-only on external cluster).
+        When empty PRODUCT, cluster provisioning and operator installation are skipped; set
         CLUSTER_SOURCE to a tenant Secret (kubeconfig key) to run BVT/smoke on that cluster.
       type: string
       default: "rhoai"
 
     - name: INSTALL_DEPENDENCIES
       description: |
-        When "true" with PRODUCT=existing, run install-dep-operators (setup-dependencies.sh,
+        When "true" with PRODUCT unset (test-only), run install-dep-operators (setup-dependencies.sh,
         RHCL, component cluster prep) before component tests. Opt-in for external/pooled clusters.
       type: string
       default: "false"
+
+    - name: SECRET_SOURCE
+      description: |
+        Where component/prepare tasks load Jenkins envFile* credentials: vault (AppRole +
+        apps/rhods-ci/shift-left at runtime, default) or tenant (cloned Konflux envfile-* Secrets).
+      type: string
+      default: "vault"
 
     - name: RHOAI_VERSION
       description: |
@@ -131,15 +164,15 @@ spec:
     - name: RHOAI_FBC_IMAGE
       description: |
         Informational RHOAI FBC catalog pullspec for Konflux UI. Set by olm_pipeline.py on trigger.
-        Empty with PRODUCT=existing. Install uses pipeline result FBCF_IMAGE from extract-fbcf-image
-        (n/a when PRODUCT=existing).
+        Empty with PRODUCT unset (test-only). Install uses pipeline result FBCF_IMAGE from extract-fbcf-image
+        (n/a when PRODUCT unset (test-only)).
       type: string
       default: ""
 
     - name: MIN_RHOAI_VERSION
       description: |
         Minimum RHOAI catalog line for PRODUCT=rhoai ITS auto-runs. Enforced in wait-for-conforma
-        from Snapshot PAC metadata (e.g. rhoai-2.25 vs rhoai-3.5-ea.2). Skipped when PRODUCT=existing
+        from Snapshot PAC metadata (e.g. rhoai-2.25 vs rhoai-3.5-ea.2). Skipped when PRODUCT unset (test-only)
         or when catalog line cannot be determined (manual snapshots).
       type: string
       default: "3.5"
@@ -169,7 +202,7 @@ spec:
     - name: OLMINSTALL_TESTS_VERSION_OVERRIDE
       description: |
         Optional override for opendatahub-tests image tag resolution and component version gates.
-        Use with PRODUCT=existing when the probed CSV should not drive tests (mirrors Jenkins UI image override).
+        Use with PRODUCT unset (test-only) when the probed CSV should not drive tests (mirrors Jenkins UI image override).
       type: string
       default: ""
 
@@ -229,12 +262,12 @@ spec:
     - name: QUAY_PULL_SECRET_NAME
       description: Name of the namespace secret containing quay.io/rhoai dockerconfigjson
       type: string
-      default: "rhoai-quay-secret"
+      default: "rhoai-external-quay-secret"
 
     - name: ROSA_HCP_KYVERNO_SECRET
       description: >-
         Tenant secret with Vault rosahcp-psquay-* Kyverno YAML and rosahcp-quay-auth
-        (.dockerconfigjson). Jenkins addICSP ROSA_HCP parity on HyperShift EaaS install.
+        (.dockerconfigjson). Jenkins addICSP ROSA_HCP parity on HyperShift EPHC install.
       type: string
       default: "olminstall-rosa-hcp-kyverno"
 
@@ -317,7 +350,7 @@ spec:
       value: $(finally.publish-results.results.OPERATOR_VERSION)
 
     - name: CLUSTER
-      description: Target cluster name (EaaS CTI or external kubeconfig context)
+      description: Target cluster name (EPHC CTI or external kubeconfig context)
       value: $(finally.publish-results.results.CLUSTER)
 
     - name: OLMINSTALL_RUN_SUMMARY
@@ -373,7 +406,7 @@ spec:
             default: ""
           - name: PRODUCT
             type: string
-            default: "existing"
+            default: ""
           - name: INSTALL_DEPENDENCIES
             type: string
             default: "false"
@@ -396,7 +429,7 @@ spec:
           - name: FBC
             description: FBC catalog component and digest to install or test against
           - name: CLUSTER
-            description: Target cluster (external kubeconfig secret or EaaS)
+            description: Target cluster (external kubeconfig secret or EPHC)
           - name: RUN
             description: PRODUCT and TEST_GATES for this PipelineRun
           - name: TRIGGER_CMD
@@ -410,16 +443,16 @@ spec:
           - name: RUN_OPENDATAHUB_TESTS
             description: '"true" when BVT or component smoke runs after install'
           - name: RUN_MINIMAL_DEPS
-            description: '"true" when setup-dependencies.sh should run (rhoai/odh install, or existing + INSTALL_DEPENDENCIES)'
+            description: '"true" when setup-dependencies.sh should run (rhoai/odh install, or test-only + INSTALL_DEPENDENCIES)'
           - name: RUN_INSTALL_DEP_OPERATORS
-            description: '"true" when install-dep-operators should run (rhoai/odh install, or existing + INSTALL_DEPENDENCIES with component tests)'
+            description: '"true" when install-dep-operators should run (rhoai/odh install, or test-only + INSTALL_DEPENDENCIES with component tests)'
 
           - name: RUN_COMPONENT_TESTS
             description: '"true" when per-component smoke and/or tier1 tasks should run'
           - name: RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS
-            description: '"true" when INSTALL_DEPENDENCIES moves component cluster prep into install-dep-operators (existing + smoke/tier1)'
+            description: '"true" when INSTALL_DEPENDENCIES moves component cluster prep into install-dep-operators (test-only + smoke/tier1)'
           - name: RUN_BVT_PLACEHOLDER_ONLY
-            description: '"true" when BVT writes placeholder JUnit only (existing, no CLUSTER_SOURCE)'
+            description: '"true" when BVT writes placeholder JUnit only (test-only, no CLUSTER_SOURCE)'
           - name: RUN_DISTRIBUTED_WORKLOADS_TESTS
             description: '"true" when trainer or distributed_workloads smoke/tier1 is selected'
           - name: COMPONENTS_CSV
@@ -444,10 +477,21 @@ spec:
               set -euo pipefail
               echo "Cloning ${REPO_URL}@${REPO_REV} into tests-shared/scripts-repo..."
               MARKER="${DEST_DIR}/.scripts-repo-revision"
-              if [[ -f "${MARKER}" && "$(cat "${MARKER}")" == "${REPO_REV}" \
-                    && -f "${DEST_DIR}/integration-tests/olminstall/olm_pipeline.py" ]]; then
-                echo "✓ scripts-repo already present at ${REPO_REV}"
-                exit 0
+              if [[ -f "${DEST_DIR}/integration-tests/olminstall/olm_pipeline.py" ]]; then
+                cd "${DEST_DIR}"
+                current_origin="$(git remote get-url origin 2>/dev/null || echo '')"
+                if [[ "${current_origin}" == "${REPO_URL}" ]]; then
+                  if git fetch --depth=1 origin "${REPO_REV}" \
+                     && git checkout -q FETCH_HEAD \
+                     && git clean -qfd; then
+                    printf '%s@%s\n' "${REPO_REV}" "$(git rev-parse HEAD)" > "${MARKER}"
+                    echo "✓ Refreshed scripts-repo at ${REPO_REV} ($(git rev-parse --short HEAD))"
+                    exit 0
+                  fi
+                  echo "Refresh failed for ${REPO_REV}; re-cloning ${REPO_URL}"
+                  cd /
+                fi
+                echo "Existing checkout points at ${current_origin:-<none>}; re-cloning ${REPO_URL}"
               fi
               rm -rf "${DEST_DIR}"
               mkdir -p "${DEST_DIR}"
@@ -456,7 +500,7 @@ spec:
               git remote add origin "${REPO_URL}"
               git fetch --depth=1 origin "${REPO_REV}"
               git checkout -q FETCH_HEAD
-              printf '%s' "${REPO_REV}" > "${MARKER}"
+              printf '%s@%s\n' "${REPO_REV}" "$(git rev-parse HEAD)" > "${MARKER}"
               echo "✓ Cloned scripts repo"
 
           - name: print-run-context
@@ -548,6 +592,10 @@ spec:
                 value: $(params.PRODUCT)
               - name: INSTALL_DEPENDENCIES
                 value: $(params.INSTALL_DEPENDENCIES)
+              - name: SECRET_SOURCE
+                value: $(params.SECRET_SOURCE)
+              - name: SECRET_SOURCE_WORKSPACE
+                value: $(workspaces.tests-shared.path)/run-config/SECRET_SOURCE
             script: |
               #!/usr/bin/env python3
               import os, sys
@@ -621,7 +669,7 @@ spec:
       displayName: "Setup — extract FBCF image"
       description: >-
         Parse the Konflux ApplicationSnapshot and record the FBC catalog image to install.
-        With PRODUCT=existing, records n/a and skips snapshot parsing (scripts from parse-pipeline-tests).
+        With PRODUCT unset (test-only), records n/a and skips snapshot parsing (scripts from parse-pipeline-tests).
       runAfter:
         - wait-for-conforma
       workspaces:
@@ -635,7 +683,7 @@ spec:
         displayName: "Setup — extract FBCF image"
         description: >-
           Parse the Konflux snapshot and record the FBC catalog image to install, or n/a when
-          PRODUCT=existing (no operator install).
+          PRODUCT unset (test-only) (no operator install).
         workspaces:
           - name: tests-shared
             description: Shared PVC with scripts-repo (cloned by parse-pipeline-tests)
@@ -646,7 +694,7 @@ spec:
             type: string
           - name: PRODUCT
             type: string
-            default: "existing"
+            default: ""
           - name: MIN_RHOAI_VERSION
             type: string
             default: "3.5"
@@ -660,12 +708,12 @@ spec:
           - name: TASK_MESSAGE
             description: Pass/fail summary for Konflux task Results panel
         steps:
-          - name: skip-fbcf-for-existing
-            displayName: Skip FBC extract (existing cluster)
+          - name: skip-fbcf-for-test-only
+            displayName: Skip FBC extract (test-only)
             when:
               - input: "$(params.PRODUCT)"
-                operator: in
-                values: ["existing"]
+                operator: notin
+                values: ["rhoai", "odh"]
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
             env:
               - name: FBCF_IMAGE_PATH
@@ -676,14 +724,14 @@ spec:
               #!/usr/bin/env bash
               set -euo pipefail
               printf '%s' 'n/a' > "${FBCF_IMAGE_PATH}"
-              printf '%s' 'PRODUCT=existing — FBC catalog extract skipped (no install).' > "${TASK_MESSAGE_PATH}"
+              printf '%s' 'PRODUCT unset (test-only) — FBC catalog extract skipped (no install).' > "${TASK_MESSAGE_PATH}"
 
           - name: parse-snapshot
             displayName: Extract FBC catalog image
             when:
               - input: "$(params.PRODUCT)"
-                operator: notin
-                values: ["existing"]
+                operator: in
+                values: ["rhoai", "odh"]
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
             env:
               - name: SNAPSHOT
@@ -706,8 +754,8 @@ spec:
             displayName: Verify RHOAI FBC >= MIN_RHOAI_VERSION
             when:
               - input: "$(params.PRODUCT)"
-                operator: notin
-                values: ["existing"]
+                operator: in
+                values: ["rhoai", "odh"]
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
             env:
               - name: PRODUCT
@@ -726,8 +774,8 @@ spec:
           - name: write-konflux-task-summary
             when:
               - input: "$(params.PRODUCT)"
-                operator: notin
-                values: ["existing"]
+                operator: in
+                values: ["rhoai", "odh"]
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
             env:
               - {name: TASK_MESSAGE_PATH, value: $(results.TASK_MESSAGE.path)}
@@ -756,9 +804,11 @@ spec:
         - name: SCRIPTS_REPO_REVISION
           value: $(params.SCRIPTS_REPO_REVISION)
 
-    - name: provision-eaas-space
-      displayName: "Cluster — provision EaaS space"
-      description: Reserve a Konflux EaaS namespace and kubeconfig secret for ephemeral cluster install.
+    - name: resolve-oci-releases
+      displayName: "Cluster — resolve OpenShift CI release"
+      description: >-
+        Resolve OCP minor and ci-operator releases JSON for provision-ephemeral-cluster
+        from OCP_VERSION_PREFIX or RHOAI_FBC_NAME, and OCP_RELEASE_CHANNEL.
       runAfter:
         - extract-fbcf-image
       when:
@@ -767,114 +817,68 @@ spec:
           values: ["pass"]
         - input: "$(params.CLUSTER_SOURCE)"
           operator: in
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
         - input: "$(params.PRODUCT)"
-          operator: notin
-          values: ["existing"]
-      taskRef:
-        resolver: git
-        params:
-          - name: url
-            value: $(params.SCRIPTS_REPO_URL)
-          - name: revision
-            value: $(params.SCRIPTS_REPO_REVISION)
-          - name: pathInRepo
-            value: integration-tests/olminstall/tekton/tasks/task-eaas-provision-space.yaml
-      params:
-        - name: ownerName
-          value: $(context.pipelineRun.name)
-        - name: ownerUid
-          value: $(context.pipelineRun.uid)
-        - name: SCRIPTS_REPO_URL
-          value: $(params.SCRIPTS_REPO_URL)
-        - name: SCRIPTS_REPO_REVISION
-          value: $(params.SCRIPTS_REPO_REVISION)
-
-    - name: install-ocp-cluster
-      displayName: "Cluster — install OCP"
-      description: >-
-        Create an ephemeral OpenShift cluster on AWS HyperShift with rhoai image
-        mirrors. Saves kubeconfig on tests-shared for install and tests.
-      runAfter:
-        - provision-eaas-space
-      when:
-        - input: "$(tasks.wait-for-conforma.results.CONFORMA_GATE)"
           operator: in
-          values: ["pass"]
-        - input: "$(params.CLUSTER_SOURCE)"
-          operator: in
-          values: ["", "EAAS"]
-        - input: "$(params.PRODUCT)"
-          operator: notin
-          values: ["existing"]
+          values: ["rhoai", "odh"]
       workspaces:
         - name: tests-shared
           workspace: tests-shared
       params:
         - name: OCP_VERSION_PREFIX
           value: $(params.OCP_VERSION_PREFIX)
+        - name: OCP_RELEASE_CHANNEL
+          value: $(params.OCP_RELEASE_CHANNEL)
+        - name: RHOAI_FBC_NAME
+          value: $(params.RHOAI_FBC_NAME)
         - name: SCRIPTS_REPO_URL
           value: $(params.SCRIPTS_REPO_URL)
         - name: SCRIPTS_REPO_REVISION
           value: $(params.SCRIPTS_REPO_REVISION)
-        - name: HYPERSHIFT_INSTANCE_TYPE
-          value: $(params.HYPERSHIFT_INSTANCE_TYPE)
-        - name: EAAS_SPACE_SECRET_REF
-          value: $(tasks.provision-eaas-space.results.secretRef)
       taskSpec:
-        displayName: "Cluster — install OCP"
-        description: >-
-          Create an ephemeral OpenShift cluster on AWS HyperShift with rhoai image
-          mirrors. Saves kubeconfig on tests-shared for install and tests.
+        displayName: "Cluster — resolve OpenShift CI release"
+        description: Resolve OCP minor and releases JSON for OpenShift CI ephemeral provision.
         workspaces:
           - name: tests-shared
         params:
           - name: OCP_VERSION_PREFIX
             type: string
             default: ""
+          - name: OCP_RELEASE_CHANNEL
+            type: string
+            default: "stable"
+          - name: RHOAI_FBC_NAME
+            type: string
+            default: ""
           - name: SCRIPTS_REPO_URL
             type: string
           - name: SCRIPTS_REPO_REVISION
             type: string
-          - name: HYPERSHIFT_INSTANCE_TYPE
-            type: string
-            default: "m5.2xlarge"
-          - name: EAAS_SPACE_SECRET_REF
-            type: string
         results:
-          - name: clusterName
-            value: "$(steps.create-cluster.results.clusterName)"
+          - name: ocpMinor
+            description: OpenShift minor requested for OpenShift CI (e.g. 4.21)
+          - name: ocpChannel
+            description: OpenShift CI payload channel (stable, candidate, or nightly)
+          - name: releases
+            description: ci-operator releases JSON for provision-ephemeral-cluster
           - name: TASK_MESSAGE
             description: Pass/fail summary for Konflux task Results panel
-        volumes:
-          - name: credentials
-            emptyDir: {}
         steps:
-          - name: get-supported-versions
-            ref:
-              resolver: git
-              params:
-                - name: url
-                  value: https://github.com/konflux-ci/build-definitions.git
-                - name: revision
-                  value: main
-                - name: pathInRepo
-                  value: stepactions/eaas-get-supported-ephemeral-cluster-versions/0.1/eaas-get-supported-ephemeral-cluster-versions.yaml
-            params:
-              - name: eaasSpaceSecretRef
-                value: $(params.EAAS_SPACE_SECRET_REF)
-          - name: resolve-ocp-prefix
+          - name: resolve-releases
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
-            results:
-              - name: prefix
-                type: string
             env:
               - name: OVERRIDE
                 value: $(params.OCP_VERSION_PREFIX)
-              - name: DEFAULT_MINOR
-                value: $(steps.get-supported-versions.results.versions[0])
-              - name: PREFIX_RESULT_PATH
-                value: $(step.results.prefix.path)
+              - name: OCP_RELEASE_CHANNEL
+                value: $(params.OCP_RELEASE_CHANNEL)
+              - name: RHOAI_FBC_NAME
+                value: $(params.RHOAI_FBC_NAME)
+              - name: MINOR_RESULT_PATH
+                value: $(results.ocpMinor.path)
+              - name: CHANNEL_RESULT_PATH
+                value: $(results.ocpChannel.path)
+              - name: RELEASES_RESULT_PATH
+                value: $(results.releases.path)
               - name: SCRIPTS_REPO_ROOT
                 value: $(workspaces.tests-shared.path)/scripts-repo/integration-tests/olminstall
             script: |
@@ -882,100 +886,172 @@ spec:
               import os, sys
 
               os.chdir(os.environ["SCRIPTS_REPO_ROOT"])
-              os.execvp(sys.executable, [sys.executable, "-m", "steps.resolve_ocp_prefix"])
-          - name: pick-version
-            ref:
-              resolver: git
-              params:
-                - name: url
-                  value: https://github.com/konflux-ci/build-definitions.git
-                - name: revision
-                  value: main
-                - name: pathInRepo
-                  value: stepactions/eaas-get-latest-openshift-version-by-prefix/0.1/eaas-get-latest-openshift-version-by-prefix.yaml
-            params:
-              - name: prefix
-                value: "$(steps.resolve-ocp-prefix.results.prefix)"
-          - name: create-cluster
-            ref:
-              resolver: git
-              params:
-                - name: url
-                  value: https://github.com/konflux-ci/build-definitions.git
-                - name: revision
-                  value: main
-                - name: pathInRepo
-                  value: stepactions/eaas-create-ephemeral-cluster-hypershift-aws/0.1/eaas-create-ephemeral-cluster-hypershift-aws.yaml
-            params:
-              - name: eaasSpaceSecretRef
-                value: $(params.EAAS_SPACE_SECRET_REF)
-              - name: version
-                value: "$(steps.pick-version.results.version)"
-              - name: instanceType
-                value: $(params.HYPERSHIFT_INSTANCE_TYPE)
-              - name: timeout
-                value: "30m"
-              - name: imageContentSources
-                value: |
-                  - mirrors:
-                      - quay.io/rhoai
-                    source: registry.redhat.io/rhoai
-
-          - name: get-kubeconfig-for-tests
-            ref:
-              resolver: git
-              params:
-                - name: url
-                  value: https://github.com/konflux-ci/build-definitions.git
-                - name: revision
-                  value: main
-                - name: pathInRepo
-                  value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
-            params:
-              - name: eaasSpaceSecretRef
-                value: $(params.EAAS_SPACE_SECRET_REF)
-              - name: clusterName
-                value: "$(steps.create-cluster.results.clusterName)"
-              - name: credentials
-                value: credentials
-
-          - name: prepare-kubeconfig-for-tests
+              os.execvp(sys.executable, [sys.executable, "-m", "steps.resolve_oci_releases"])
+          - name: write-konflux-task-summary
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
-            volumeMounts:
-              - name: credentials
-                mountPath: /credentials
             env:
-              - name: EAAS_KUBECONFIG_REL
-                value: $(steps.get-kubeconfig-for-tests.results.kubeconfig)
+              - {name: TASK_MESSAGE_PATH, value: $(results.TASK_MESSAGE.path)}
+              - name: PIPELINE_TASK
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['tekton.dev/pipelineTask']
+              - {name: SCRIPTS_REPO_ROOT, value: $(workspaces.tests-shared.path)/scripts-repo/integration-tests/olminstall}
             script: |
-              #!/bin/bash
+              #!/usr/bin/env bash
               set -euo pipefail
-              src="/credentials/${EAAS_KUBECONFIG_REL}"
-              if [[ ! -f "${src}" ]]; then
-                echo "ERROR: EaaS kubeconfig missing at ${src}" >&2
-                exit 1
-              fi
-              cp "${src}" /credentials/kubeconfig
-              echo "EaaS kubeconfig staged at /credentials/kubeconfig (from ${EAAS_KUBECONFIG_REL})"
+              [[ -n "${SCRIPTS_REPO_ROOT:-}" ]] || exit 0
+              exec bash "${SCRIPTS_REPO_ROOT}/tekton/scripts/run_write_task_message.sh"
 
+    - name: provision-ephemeral-cluster
+      displayName: "Cluster — provision OpenShift CI HyperShift"
+      description: >-
+        Provision an ephemeral HyperShift cluster via OpenShift CI
+        (openshift/konflux-tasks provision-ephemeral-cluster, KONFLUX-15294).
+      runAfter:
+        - resolve-oci-releases
+      when:
+        - input: "$(tasks.wait-for-conforma.results.CONFORMA_GATE)"
+          operator: in
+          values: ["pass"]
+        - input: "$(params.CLUSTER_SOURCE)"
+          operator: in
+          values: ["", "EPHC"]
+        - input: "$(params.PRODUCT)"
+          operator: in
+          values: ["rhoai", "odh"]
+      timeout: 2h15m0s
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/openshift/konflux-tasks
+          - name: revision
+            value: $(params.OCI_TASKS_REVISION)
+          - name: pathInRepo
+            value: tasks/provision-ephemeral-cluster/0.1/provision-ephemeral-cluster.yaml
+      params:
+        - name: ownerName
+          value: $(context.pipelineRun.name)
+        - name: ownerUid
+          value: $(context.pipelineRun.uid)
+        - name: workflow
+          value: $(params.OCI_WORKFLOW)
+        - name: clusterProfile
+          value: $(params.OCI_CLUSTER_PROFILE)
+        - name: timeout
+          value: "2h"
+        - name: releases
+          value: $(tasks.resolve-oci-releases.results.releases)
+        - name: env
+          value: >-
+            {"COMPUTE_NODE_TYPE":"$(params.HYPERSHIFT_INSTANCE_TYPE)","HYPERSHIFT_NODE_COUNT":"3","HOSTED_MANAGEMENT_CLUSTER":"hosted-mgmt2","IMAGE_CONTENT_SOURCES":"- source: registry.redhat.io/rhoai\n  mirrors:\n    - quay.io/rhoai"}
+
+    - name: stage-ephemeral-kubeconfig
+      displayName: "Cluster — stage ephemeral kubeconfig"
+      description: >-
+        Copy the OpenShift CI ephemeral kubeconfig onto tests-shared for install
+        and tests. Cluster create is provision-ephemeral-cluster.
+      runAfter:
+        - provision-ephemeral-cluster
+      when:
+        - input: "$(tasks.wait-for-conforma.results.CONFORMA_GATE)"
+          operator: in
+          values: ["pass"]
+        - input: "$(params.CLUSTER_SOURCE)"
+          operator: in
+          values: ["", "EPHC"]
+        - input: "$(params.PRODUCT)"
+          operator: in
+          values: ["rhoai", "odh"]
+      workspaces:
+        - name: tests-shared
+          workspace: tests-shared
+      params:
+        - name: CLUSTER_CREDENTIALS_SECRET_REF
+          value: $(tasks.provision-ephemeral-cluster.results.secretRef)
+        - name: CLUSTER_CLAIM_NAME
+          value: $(tasks.provision-ephemeral-cluster.results.testPlatformClusterClaimName)
+        - name: OCP_MINOR
+          value: $(tasks.resolve-oci-releases.results.ocpMinor)
+        - name: OCP_CHANNEL
+          value: $(tasks.resolve-oci-releases.results.ocpChannel)
+        - name: SCRIPTS_REPO_URL
+          value: $(params.SCRIPTS_REPO_URL)
+        - name: SCRIPTS_REPO_REVISION
+          value: $(params.SCRIPTS_REPO_REVISION)
+      taskSpec:
+        displayName: "Cluster — stage ephemeral kubeconfig"
+        description: >-
+          Copy OpenShift CI ephemeral kubeconfig onto tests-shared for install and tests.
+          Echoes OCP minor and channel resolved for this provision (not from the upstream Task).
+        workspaces:
+          - name: tests-shared
+        params:
+          - name: CLUSTER_CREDENTIALS_SECRET_REF
+            type: string
+          - name: CLUSTER_CLAIM_NAME
+            type: string
+            default: ""
+          - name: OCP_MINOR
+            type: string
+            default: ""
+          - name: OCP_CHANNEL
+            type: string
+            default: ""
+          - name: SCRIPTS_REPO_URL
+            type: string
+          - name: SCRIPTS_REPO_REVISION
+            type: string
+        results:
+          - name: clusterName
+            description: TestPlatformCluster claim name (ephemeral cluster id)
+          - name: ocpMinor
+            description: OpenShift minor requested for this ephemeral cluster
+          - name: ocpChannel
+            description: OpenShift CI payload channel (stable, candidate, or nightly)
+          - name: TASK_MESSAGE
+            description: Pass/fail summary for Konflux task Results panel
+        volumes:
+          - name: cluster-credentials
+            secret:
+              secretName: $(params.CLUSTER_CREDENTIALS_SECRET_REF)
+        steps:
           - name: sync-kubeconfig-to-tests-shared
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
             volumeMounts:
-              - name: credentials
-                mountPath: /credentials
+              - name: cluster-credentials
+                mountPath: /var/run/secrets/cluster
+                readOnly: true
             env:
               - name: TESTS_SHARED
                 value: $(workspaces.tests-shared.path)
+              - name: CLUSTER_CLAIM_NAME
+                value: $(params.CLUSTER_CLAIM_NAME)
+              - name: CLUSTER_NAME_PATH
+                value: $(results.clusterName.path)
+              - name: OCP_MINOR
+                value: $(params.OCP_MINOR)
+              - name: OCP_CHANNEL
+                value: $(params.OCP_CHANNEL)
+              - name: OCP_MINOR_PATH
+                value: $(results.ocpMinor.path)
+              - name: OCP_CHANNEL_PATH
+                value: $(results.ocpChannel.path)
             script: |
               #!/bin/bash
               set -euo pipefail
-              mkdir -p "${TESTS_SHARED}/credentials"
-              if [[ ! -f /credentials/kubeconfig ]]; then
-                echo "ERROR: EaaS kubeconfig missing under /credentials" >&2
+              src="/var/run/secrets/cluster/kubeconfig"
+              if [[ ! -f "${src}" ]]; then
+                echo "ERROR: ephemeral kubeconfig missing at ${src}" >&2
+                ls -la /var/run/secrets/cluster >&2 || true
                 exit 1
               fi
-              cp /credentials/kubeconfig "${TESTS_SHARED}/credentials/kubeconfig"
-              echo "EaaS kubeconfig staged in tests-shared workspace"
+              mkdir -p "${TESTS_SHARED}/credentials"
+              cp "${src}" "${TESTS_SHARED}/credentials/kubeconfig"
+              printf '%s' "${CLUSTER_CLAIM_NAME}" > "${CLUSTER_NAME_PATH}"
+              printf '%s' "${OCP_MINOR}" > "${OCP_MINOR_PATH}"
+              printf '%s' "${OCP_CHANNEL}" > "${OCP_CHANNEL_PATH}"
+              echo "Ephemeral kubeconfig staged in tests-shared (claim ${CLUSTER_CLAIM_NAME} OCP ${OCP_MINOR} channel ${OCP_CHANNEL})"
 
           - name: write-konflux-task-summary
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
@@ -1006,7 +1082,7 @@ spec:
           values: ["pass"]
         - input: "$(params.CLUSTER_SOURCE)"
           operator: notin
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       params:
         - name: CLUSTER_SOURCE
           value: $(params.CLUSTER_SOURCE)
@@ -1075,7 +1151,7 @@ spec:
             default: "false"
           - name: CLUSTER_IDLE_WAIT_SEC
             type: string
-            default: "14100"
+            default: "21300"
           - name: CLUSTER_IDLE_POLL_SEC
             type: string
             default: "60"
@@ -1214,10 +1290,11 @@ spec:
           values: ["pass"]
         - input: "$(params.CLUSTER_SOURCE)"
           operator: notin
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
+        # install PRODUCT (rhoai/odh): infer_cleanup_param + pipeline gate.
         - input: "$(params.PRODUCT)"
-          operator: notin
-          values: ["existing"]
+          operator: in
+          values: ["rhoai", "odh"]
         - input: "$(params.CLEANUP)"
           operator: in
           values: ["true"]
@@ -1343,7 +1420,7 @@ spec:
         dependency and operator install.
       runAfter:
         - parse-pipeline-tests
-        - install-ocp-cluster
+        - stage-ephemeral-kubeconfig
         - external-cluster-ready
         - cleanup-external
         - wait-for-conforma
@@ -1393,7 +1470,7 @@ spec:
       timeout: 90m0s
       runAfter:
         - parse-pipeline-tests
-        - install-ocp-cluster
+        - stage-ephemeral-kubeconfig
         - external-cluster-ready
         - cleanup-external
         - wait-for-conforma
@@ -1452,7 +1529,7 @@ spec:
       timeout: 45m0s
       runAfter:
         - parse-pipeline-tests
-        - install-ocp-cluster
+        - stage-ephemeral-kubeconfig
         - external-cluster-ready
         - cleanup-external
         - wait-for-conforma
@@ -1519,7 +1596,7 @@ spec:
       timeout: 45m0s
       runAfter:
         - parse-pipeline-tests
-        - install-ocp-cluster
+        - stage-ephemeral-kubeconfig
         - external-cluster-ready
         - cleanup-external
         - wait-for-conforma
@@ -1582,18 +1659,18 @@ spec:
       displayName: "Install — verify operator ready"
       description: >-
         Wait until the dashboard and gateway are ready after install (or on an
-        existing cluster). Stages the dashboard URL for component tests.
+        external test cluster). Stages the dashboard URL for component tests.
       timeout: 90m0s
       when:
         - input: "$(params.PRODUCT)-$(params.CLUSTER_SOURCE)"
           operator: notin
-          values: ["existing-"]
+          values: ["-"]
       workspaces:
         - name: tests-shared
           workspace: tests-shared
       runAfter:
         - wait-for-conforma
-        - install-ocp-cluster
+        - stage-ephemeral-kubeconfig
         - install-rhoai
         - install-odh
         - external-cluster-ready
@@ -1637,7 +1714,7 @@ spec:
           workspace: tests-shared
       runAfter:
         - parse-pipeline-tests
-        - install-ocp-cluster
+        - stage-ephemeral-kubeconfig
         - verify-operator-ready
         - install-rhoai
         - install-odh
@@ -1717,7 +1794,7 @@ spec:
             default: "rhods-operator"
           - name: PRODUCT
             type: string
-            default: "existing"
+            default: ""
           - name: RUN_SMOKE
             type: string
             default: "false"
@@ -1742,14 +1819,6 @@ spec:
           - name: OLMINSTALL_TESTS_VERSION_OVERRIDE
             type: string
             default: ""
-          - name: EAAS_SPACE_SECRET_REF
-            type: string
-            default: ""
-            description: EaaS space secret ref from provision-eaas-space (empty for external clusters)
-          - name: EAAS_CLUSTER_NAME
-            type: string
-            default: ""
-            description: Ephemeral cluster name from install-ocp-cluster (empty for external clusters)
           - name: SMOKE_AWS_SECRET
             type: string
             default: "unused-smoke-aws-secret"
@@ -1777,6 +1846,12 @@ spec:
           - name: credentials
             emptyDir: {}
           - name: smoke-aws-credentials
+            emptyDir: {}
+          - name: vault-approle
+            secret:
+              secretName: vault-approle
+              optional: true
+          - name: tenant-test-secrets
             secret:
               optional: true
               secretName: $(params.SMOKE_AWS_SECRET)
@@ -1845,7 +1920,7 @@ spec:
             when:
               - input: "$(params.CLUSTER_SOURCE)"
                 operator: notin
-                values: ["", "EAAS"]
+                values: ["", "EPHC"]
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
             volumeMounts:
               - name: credentials
@@ -1877,8 +1952,8 @@ spec:
               #!/bin/bash
               set -euo pipefail
               mkdir -p "${TESTS_SHARED}/credentials"
-              if [[ "${PRODUCT}" == "existing" && -z "${CLUSTER_SOURCE}" ]]; then
-                echo "opendatahub-tests-prepare: no workload cluster (PRODUCT=existing, empty CLUSTER_SOURCE)"
+              if [[ "${PRODUCT}" != "rhoai" && "${PRODUCT}" != "odh" && -z "${CLUSTER_SOURCE}" ]]; then
+                echo "opendatahub-tests-prepare: no workload cluster (PRODUCT unset (test-only), empty CLUSTER_SOURCE)"
                 exit 0
               fi
               if [[ -f "${TESTS_SHARED}/.skip-verify-operator-ready" ]]; then
@@ -2040,7 +2115,7 @@ spec:
 
           - name: prepare-components-prerequisites-external
             displayName: Component cluster prep (external pooled)
-            # Mutually exclusive with prepare-components-prerequisites-eaas.
+            # Mutually exclusive with prepare-components-prerequisites-ephc.
             # Skipped when RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS=true (prep runs in install-dep-operators).
             when:
               - input: "$(params.RUN_COMPONENT_TESTS)"
@@ -2051,12 +2126,17 @@ spec:
                 values: ["false"]
               - input: "$(params.CLUSTER_SOURCE)"
                 operator: notin
-                values: ["", "EAAS"]
+                values: ["", "EPHC"]
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
             volumeMounts:
+              - name: vault-approle
+                mountPath: /vault-approle
+                readOnly: true
+              - name: tenant-test-secrets
+                mountPath: /tenant-test-secrets
+                readOnly: true
               - name: smoke-aws-credentials
                 mountPath: /smoke-aws-credentials
-                readOnly: true
             env:
               - name: KUBECONFIG
                 value: $(workspaces.tests-shared.path)/credentials/kubeconfig
@@ -2081,8 +2161,8 @@ spec:
               print("[prep-external] prepare-components-prerequisites-external", flush=True)
               os.execvp(sys.executable, [sys.executable, "-m", "runners.component_cluster_prep"])
 
-          - name: prepare-components-prerequisites-eaas
-            displayName: Component cluster prep (EaaS fresh install)
+          - name: prepare-components-prerequisites-ephc
+            displayName: Component cluster prep (EPHC fresh install)
             # Mutually exclusive with prepare-components-prerequisites-external.
             # Skipped when RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS=true (prep runs in install-dep-operators).
             when:
@@ -2094,15 +2174,20 @@ spec:
                 values: ["false"]
               - input: "$(params.CLUSTER_SOURCE)"
                 operator: in
-                values: ["", "EAAS"]
+                values: ["", "EPHC"]
               - input: "$(params.PRODUCT)"
-                operator: notin
-                values: ["existing"]
+                operator: in
+                values: ["rhoai", "odh"]
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
             volumeMounts:
+              - name: vault-approle
+                mountPath: /vault-approle
+                readOnly: true
+              - name: tenant-test-secrets
+                mountPath: /tenant-test-secrets
+                readOnly: true
               - name: smoke-aws-credentials
                 mountPath: /smoke-aws-credentials
-                readOnly: true
             env:
               - name: KUBECONFIG
                 value: $(workspaces.tests-shared.path)/credentials/kubeconfig
@@ -2126,7 +2211,7 @@ spec:
               #!/usr/bin/env python3
               import os, sys
               os.chdir(os.environ["SCRIPTS_REPO_ROOT"])
-              print("[prep-eaas] prepare-components-prerequisites-eaas", flush=True)
+              print("[prep-ephc] prepare-components-prerequisites-ephc", flush=True)
               os.execvp(sys.executable, [sys.executable, "-m", "runners.component_cluster_prep"])
 
           - name: record-component-test-plan-export-status
@@ -2353,7 +2438,6 @@ spec:
               os.execvp(sys.executable, [sys.executable, "-m", "steps.refresh_component_smoke_flags"])
 
 
-
     - name: bvt-health-checks
       displayName: "BVT — health checks"
       description: >-
@@ -2394,7 +2478,6 @@ spec:
           value: $(params.CLUSTER_SOURCE)
         - name: PRODUCT
           value: $(params.PRODUCT)
-
 
 
     - name: test-workbenches
@@ -2475,6 +2558,9 @@ spec:
           workspace: tests-shared
       runAfter:
         - test-workbenches
+        - install-rhoai
+        - opendatahub-tests-prepare
+        - resolve-component-run-flags
       when:
         - input: "$(tasks.wait-for-conforma.results.CONFORMA_GATE)"
           operator: in
@@ -2524,7 +2610,7 @@ spec:
       onError: continue
       displayName: "Test — model server"
       description: |
-        Model Server / KServe smoke tests. Opt-in on external clusters; needs cloud storage and/or LDAP credentials. On EaaS, minimal dependencies are installed before the operator.
+        Model Server / KServe smoke tests. Opt-in on external clusters; needs cloud storage and/or LDAP credentials. On EPHC, minimal dependencies are installed before the operator.
 
         - Test framework: opendatahub-tests (pytest).
         - Command: pytest tests/model_serving/model_server -m 'smoke and not downstream_only' -svv -ra -o junit_suite_name=model_server --tc use_unprivileged_client:False -k 'not TestMLServerModelCar and not TestLLMDSmoke'.
@@ -2537,6 +2623,8 @@ spec:
           workspace: tests-shared
       runAfter:
         - test-model-registry
+        - install-rhoai
+        - opendatahub-tests-prepare
       when:
         - input: "$(tasks.wait-for-conforma.results.CONFORMA_GATE)"
           operator: in
@@ -2599,6 +2687,8 @@ spec:
           workspace: tests-shared
       runAfter:
         - test-model-server
+        - install-rhoai
+        - opendatahub-tests-prepare
       when:
         - input: "$(tasks.wait-for-conforma.results.CONFORMA_GATE)"
           operator: in
@@ -2648,7 +2738,7 @@ spec:
       onError: continue
       displayName: "Test — maas billing"
       description: |
-        Models-as-a-Service billing smoke tests. May fail on external pooled clusters until MaaS auth gateway setup completes within the task timeout. EaaS HyperShift blocks OAuth IdP patches — keep unprivileged client off (admin SA).
+        Models-as-a-Service billing smoke tests. May fail on external pooled clusters until MaaS auth gateway setup completes within the task timeout. EPHC HyperShift blocks OAuth IdP patches — keep unprivileged client off (admin SA).
 
         - Test framework: opendatahub-tests (pytest).
         - Command: pytest tests/model_serving/maas_billing -m 'smoke' -svv -o junit_suite_name=maas_billing --tc use_unprivileged_client:False.
@@ -2662,6 +2752,8 @@ spec:
           workspace: tests-shared
       runAfter:
         - test-model-runtime
+        - install-rhoai
+        - opendatahub-tests-prepare
       when:
         - input: "$(tasks.wait-for-conforma.results.CONFORMA_GATE)"
           operator: in
@@ -2897,7 +2989,7 @@ spec:
       onError: continue
       displayName: "Test — ogx"
       description: |
-        Red Hat OGX Distribution smoke tests. Catalog keeps Jenkins baseline (-k not pgvector). verify_images skips apply on EaaS and EXTERNAL (mirrored) clusters via the pytest runner, not this catalog -k. Do not add runner `-k not vector_stores` (empties smoke under not pgvector).
+        Red Hat OGX Distribution smoke tests. Catalog keeps Jenkins baseline (-k not pgvector). verify_images skips apply on EPHC and EXTERNAL (mirrored) clusters via the pytest runner, not this catalog -k. Do not add runner `-k not vector_stores` (empties smoke under not pgvector).
 
         - Test framework: opendatahub-tests (pytest).
         - Command: pytest tests/ogx -m 'smoke' -svv -o junit_suite_name=ogx --tc use_unprivileged_client:False --tc distribution_name:rh-dev -k 'not pgvector'.
@@ -3523,7 +3615,7 @@ spec:
 
         - Test framework: golang tiered tests.
         - Image: quay.io/opendatahub/distributed-workloads-tests:latest.
-        - Smoke command: mkdir -p results && bash run-test.sh --format standard-verbose --junitfile results/xunit_report.xml --junitfile-testsuite-name short --junitfile-testcase-classname relative --junitfile-hide-skipped-tests -- -timeout 60m ./kfto -args -testTier=Smoke.
+        - Smoke command: mkdir -p results && bash run-test.sh --format standard-verbose --junitfile results/xunit_report.xml --junitfile-testsuite-name short --junitfile-testcase-classname relative -- -timeout 60m ./kfto -args -testTier=Smoke.
         - Timeouts: smoke 15m, tier1 45m.
       timeout: 69m0s
       workspaces:
@@ -3770,7 +3862,8 @@ spec:
         - Test framework: golang ginkgo suite.
         - Image: quay.io/opendatahub/opendatahub-operator-e2e:main.
         - Smoke command: bash run_e2e_tests.sh.
-        - Timeouts: smoke 35m, tier1 90m.
+        - Timeouts: smoke 45m, tier1 90m.
+        - Min pass rate for Tekton success: 97%.
         - Version gate: minRhoai 3.3.
         - Runs last in the component test chain.
       timeout: 125m0s
@@ -4151,7 +4244,7 @@ spec:
                   path: config.json
         results:
           - name: CLUSTER
-            description: Target cluster name (EaaS CTI or external kubeconfig context)
+            description: Target cluster name (EPHC CTI or external kubeconfig context)
           - name: OPERATOR_VERSION
             description: Installed operator CSV version when install completed
           - name: TESTS_SUMMARY
@@ -4389,6 +4482,46 @@ spec:
               os.chdir(os.environ["SCRIPTS_REPO_ROOT"])
               os.execvp(sys.executable, [sys.executable, "-m", "runners.report.patch_pipelinerun_summary"])
 
+          - name: write-konflux-task-summary
+            displayName: Write Konflux task summary
+            image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
+            env:
+              - {name: TASK_MESSAGE_PATH, value: $(results.TASK_MESSAGE.path)}
+              - {name: TEST_OUTPUT_PATH, value: $(results.TEST_OUTPUT.path)}
+              - {name: TESTS_SUMMARY_PATH, value: $(results.TESTS_SUMMARY.path)}
+              - {name: BVT_GATE_PATH, value: $(results.BVT_GATE.path)}
+              - {name: SMOKE_GATE_PATH, value: $(results.SMOKE_GATE.path)}
+              - {name: CLUSTER_PATH, value: $(results.CLUSTER.path)}
+              - {name: OPERATOR_VERSION_PATH, value: $(results.OPERATOR_VERSION.path)}
+              - {name: ARTIFACTS_URL_PATH, value: $(results.ARTIFACTS_URL.path)}
+              - name: BVT_TEST_OUTPUT_PATH
+                value: $(workspaces.tests-shared.path)/tests-payload/.olminstall-bvt-test-output.json
+              - name: SMOKE_TEST_OUTPUT_PATH
+                value: $(workspaces.tests-shared.path)/tests-payload/.olminstall-smoke-test-output.json
+              - name: PIPELINE_RUN_NAME
+                value: $(context.pipelineRun.name)
+              - name: TEST_GATES
+                value: $(params.TEST_GATES)
+              - name: PRODUCT
+                value: $(params.PRODUCT)
+              - name: CONFORMA_GATE
+                value: $(params.CONFORMA_GATE)
+              - name: PIPELINE_TASK_STATUS
+                value: $(params.AGGREGATE_TASKS_STATUS)
+              - name: PIPELINE_TASK
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['tekton.dev/pipelineTask']
+              - name: OLMINSTALL_TASK_ALWAYS_SUCCEED
+                value: "1"
+              - {name: SCRIPTS_REPO_ROOT, value: $(workspaces.tests-shared.path)/scripts-repo/integration-tests/olminstall}
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              [[ -n "${SCRIPTS_REPO_ROOT:-}" ]] || exit 0
+              bash "${SCRIPTS_REPO_ROOT}/tekton/scripts/run_write_task_message.sh" || true
+              exit 0
+
           - name: check-requested-gates-ran
             displayName: Fail hollow green when gates skipped
             image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
@@ -4452,46 +4585,6 @@ spec:
               import os, sys
               os.chdir(os.environ["SCRIPTS_REPO_ROOT"])
               os.execvp(sys.executable, [sys.executable, "-m", "runners.report.send_notification"])
-
-          - name: write-konflux-task-summary
-            displayName: Write Konflux task summary
-            image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
-            env:
-              - {name: TASK_MESSAGE_PATH, value: $(results.TASK_MESSAGE.path)}
-              - {name: TEST_OUTPUT_PATH, value: $(results.TEST_OUTPUT.path)}
-              - {name: TESTS_SUMMARY_PATH, value: $(results.TESTS_SUMMARY.path)}
-              - {name: BVT_GATE_PATH, value: $(results.BVT_GATE.path)}
-              - {name: SMOKE_GATE_PATH, value: $(results.SMOKE_GATE.path)}
-              - {name: CLUSTER_PATH, value: $(results.CLUSTER.path)}
-              - {name: OPERATOR_VERSION_PATH, value: $(results.OPERATOR_VERSION.path)}
-              - {name: ARTIFACTS_URL_PATH, value: $(results.ARTIFACTS_URL.path)}
-              - name: BVT_TEST_OUTPUT_PATH
-                value: $(workspaces.tests-shared.path)/tests-payload/.olminstall-bvt-test-output.json
-              - name: SMOKE_TEST_OUTPUT_PATH
-                value: $(workspaces.tests-shared.path)/tests-payload/.olminstall-smoke-test-output.json
-              - name: PIPELINE_RUN_NAME
-                value: $(context.pipelineRun.name)
-              - name: TEST_GATES
-                value: $(params.TEST_GATES)
-              - name: PRODUCT
-                value: $(params.PRODUCT)
-              - name: CONFORMA_GATE
-                value: $(params.CONFORMA_GATE)
-              - name: PIPELINE_TASK_STATUS
-                value: $(params.AGGREGATE_TASKS_STATUS)
-              - name: PIPELINE_TASK
-                valueFrom:
-                  fieldRef:
-                    fieldPath: metadata.labels['tekton.dev/pipelineTask']
-              - name: OLMINSTALL_TASK_ALWAYS_SUCCEED
-                value: "1"
-              - {name: SCRIPTS_REPO_ROOT, value: $(workspaces.tests-shared.path)/scripts-repo/integration-tests/olminstall}
-            script: |
-              #!/usr/bin/env bash
-              set -euo pipefail
-              [[ -n "${SCRIPTS_REPO_ROOT:-}" ]] || exit 0
-              bash "${SCRIPTS_REPO_ROOT}/tekton/scripts/run_write_task_message.sh" || true
-              exit 0
 
   workspaces:
     - name: tests-shared

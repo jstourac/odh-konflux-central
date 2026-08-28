@@ -10,7 +10,7 @@ _DEFAULT_MAAS_DSC_PREREQ_GRACE_SEC = 120
 _DEFAULT_MAAS_GATEWAY_PROGRAMMED_WAIT_SEC = 600
 _DEFAULT_MAAS_GATEWAY_HTTPS_WAIT_SEC = 120
 _DEFAULT_MAAS_GATEWAY_PREP_PROGRAMMED_WAIT_SEC = 300
-_DEFAULT_MAAS_GATEWAY_PREP_PROGRAMMED_WAIT_SEC_EAAS = 480
+_DEFAULT_MAAS_GATEWAY_PREP_PROGRAMMED_WAIT_SEC_EHC = 480
 
 
 def maas_prep_timeout_sec() -> int:
@@ -45,12 +45,12 @@ def maas_gateway_https_wait_sec() -> int:
 
 
 def maas_gateway_prep_programmed_wait_sec() -> int:
-    """Wait for Gateway Programmed before HTTPS/modelsAsService (EaaS reconciles slowly)."""
-    from install.gateway_config import cluster_source_is_eaas
+    """Wait for Gateway Programmed before HTTPS/modelsAsService (EPHC reconciles slowly)."""
+    from install.gateway_config import cluster_source_is_ephc
 
     default = (
-        _DEFAULT_MAAS_GATEWAY_PREP_PROGRAMMED_WAIT_SEC_EAAS
-        if cluster_source_is_eaas()
+        _DEFAULT_MAAS_GATEWAY_PREP_PROGRAMMED_WAIT_SEC_EHC
+        if cluster_source_is_ephc()
         else _DEFAULT_MAAS_GATEWAY_PREP_PROGRAMMED_WAIT_SEC
     )
     return int(
@@ -62,5 +62,15 @@ def maas_gateway_prep_programmed_wait_sec() -> int:
 
 
 def bvt_dsc_ready_timeout_sec() -> int:
-    """Wait for DSC Ready before operator_health BVT (pytest only allows 120s)."""
-    return int(os.environ.get("BVT_DSC_READY_TIMEOUT_SEC", "600"))
+    """Wait for DSC Ready+DashboardReady before operator_health BVT (pytest only allows 120s)."""
+    return int(os.environ.get("BVT_DSC_READY_TIMEOUT_SEC", "900"))
+
+
+def bvt_dsc_ready_settle_sec() -> int:
+    """Require Ready+DashboardReady to hold this long so a dashboard rollout cannot race pytest."""
+    return int(os.environ.get("BVT_DSC_READY_SETTLE_SEC", "45"))
+
+
+def bvt_cluster_nodes_timeout_sec() -> int:
+    """Wait for all nodes schedulable before cluster_health BVT."""
+    return int(os.environ.get("BVT_CLUSTER_NODES_TIMEOUT_SEC", "600"))

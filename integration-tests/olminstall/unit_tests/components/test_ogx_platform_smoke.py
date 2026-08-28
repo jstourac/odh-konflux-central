@@ -45,7 +45,7 @@ class OgxPlatformSmokeTest(unittest.TestCase):
                 "</testsuite>\n",
                 encoding="utf-8",
             )
-            with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False):
+            with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False):
                 ensure_ogx_junit_after_pytest(root)
             self.assertIn("vector", junit.read_text(encoding="utf-8"))
 
@@ -53,7 +53,7 @@ class OgxPlatformSmokeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with (
-                mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False),
+                mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False),
                 mock.patch(
                     "components.ogx.platform_smoke.run_ogx_platform_checks",
                     return_value=[("ogx_crds_present", True, "ok")],

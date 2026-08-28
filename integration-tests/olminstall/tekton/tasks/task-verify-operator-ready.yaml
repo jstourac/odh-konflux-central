@@ -23,7 +23,7 @@ spec:
       default: ""
     - name: PRODUCT
       type: string
-      default: "existing"
+      default: ""
     - name: COMPONENTS_CSV
       type: string
       default: ""
@@ -57,11 +57,11 @@ spec:
       displayName: Skip when no cluster
       when:
         - input: "$(params.PRODUCT)"
-          operator: in
-          values: ["existing"]
+          operator: notin
+          values: ["rhoai", "odh"]
         - input: "$(params.CLUSTER_SOURCE)"
           operator: in
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
       env:
         - name: TESTS_SHARED
@@ -70,16 +70,16 @@ spec:
         #!/bin/bash
         set -euo pipefail
         if [[ ! -f "${TESTS_SHARED}/credentials/kubeconfig" ]]; then
-          echo "PRODUCT=existing without workload cluster; skipping verify-operator-ready"
+          echo "test-only PRODUCT without workload cluster; skipping verify-operator-ready"
           touch "${TESTS_SHARED}/.skip-verify-operator-ready"
         fi
 
-    - name: prepare-kubeconfig-eaas
-      displayName: Stage EaaS kubeconfig
+    - name: prepare-kubeconfig-ephc
+      displayName: Stage EPHC kubeconfig
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: in
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
       volumeMounts:
         - name: credentials
@@ -96,18 +96,18 @@ spec:
         fi
         src="${TESTS_SHARED}/credentials/kubeconfig"
         if [[ ! -f "${src}" ]]; then
-          echo "ERROR: EaaS kubeconfig missing at ${src}" >&2
+          echo "ERROR: EPHC kubeconfig missing at ${src}" >&2
           exit 1
         fi
         cp "${src}" /credentials/kubeconfig
-        echo "EaaS kubeconfig staged at /credentials/kubeconfig"
+        echo "EPHC kubeconfig staged at /credentials/kubeconfig"
 
     - name: prepare-kubeconfig-external
       displayName: Load external kubeconfig
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: notin
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
       volumeMounts:
         - name: credentials
@@ -167,6 +167,8 @@ spec:
           value: $(params.INSTALL_DEPENDENCIES)
         - name: RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS
           value: $(params.RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS)
+        - name: CLUSTER_SOURCE
+          value: $(params.CLUSTER_SOURCE)
         - name: SCRIPTS_REPO_ROOT
           value: $(workspaces.tests-shared.path)/scripts-repo/integration-tests/olminstall
       script: |

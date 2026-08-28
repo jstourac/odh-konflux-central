@@ -12,7 +12,7 @@ from steps import extract_fbcf_image as efi
 class ExtractFbcfImageTest(unittest.TestCase):
     def test_existing_product_skips_snapshot(self) -> None:
         env = {
-            "PRODUCT": "existing",
+            "PRODUCT": "",
             "RESULT_PATH": "/tekton/results/fbcf-image",
         }
         with patch.dict("os.environ", env, clear=True):
@@ -34,7 +34,8 @@ class ExtractFbcfImageTest(unittest.TestCase):
             rc = efi.main()
         self.assertEqual(rc, 1)
 
-    def test_missing_product_parses_snapshot_not_n_a(self) -> None:
+    def test_unset_product_skips_snapshot(self) -> None:
+        """Unset PRODUCT defaults to test-only (no FBC extract)."""
         snap = {
             "components": [
                 {
@@ -53,10 +54,7 @@ class ExtractFbcfImageTest(unittest.TestCase):
                 with patch.object(Path, "write_text") as mock_write:
                     rc = efi.main()
         self.assertEqual(rc, 0)
-        mock_write.assert_called_once_with(
-            "quay.io/rhoai/rhoai-fbc-fragment@sha256:abc",
-            encoding="utf-8",
-        )
+        mock_write.assert_called_once_with("n/a", encoding="utf-8")
 
     def test_extracts_container_image(self) -> None:
         snap = {

@@ -28,7 +28,7 @@ spec:
       default: ""
     - name: PRODUCT
       type: string
-      default: "existing"
+      default: ""
     - name: TEST_GATES
       type: string
       default: ""

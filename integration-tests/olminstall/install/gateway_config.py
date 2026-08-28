@@ -10,7 +10,7 @@ import time
 
 from install.dsc_install import oc_run
 from install.ldap import _cluster_is_byoidc
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
+from suite.its_trigger_params import is_ephemeral_hosted_cluster_source
 
 _GATEWAY_NAME = "default-gateway"
 _OIDC_SECRET_NAME = "keycloak-client-secret"
@@ -23,11 +23,16 @@ _SERVICEMESH_CSV_PREFIX = "servicemeshoperator"
 _KUBE_AUTH_PROXY_NS = "openshift-ingress"
 _KUBE_AUTH_PROXY_DEPLOY = "kube-auth-proxy"
 _KUBE_AUTH_PROXY_CREDS = "kube-auth-proxy-creds"
+_OPENSHIFT_GATEWAY_ISTIO_NAME = "openshift-gateway"
+_OPENSHIFT_GATEWAY_NS = "openshift-ingress"
+_OPENSHIFT_GATEWAY_ISTIOD = "istiod-openshift-gateway"
+_ISTIO_EOL_MARKERS = ("end-of-life", "end of life")
+_DEFAULT_OPENSHIFT_GATEWAY_ISTIO_WAIT_SEC = 600
 
 
-def cluster_source_is_eaas() -> bool:
-    source = os.environ.get("CLUSTER_SOURCE", "").strip()
-    return source in ("", CLUSTER_SOURCE_EAAS)
+def cluster_source_is_ephc() -> bool:
+    """True on an Ephemeral Hosted Cluster in OpenShift CI (Prow)."""
+    return is_ephemeral_hosted_cluster_source(os.environ.get("CLUSTER_SOURCE", ""))
 
 
 def gateway_oidc_configured() -> bool:
@@ -41,8 +46,34 @@ def gateway_oidc_configured() -> bool:
     return bool(issuer) and bool(client_id) and not _malformed_oidc_client_id(client_id)
 
 
+def _cluster_has_oidc_provider() -> bool | None:
+    """True when cluster Authentication lists at least one OIDC provider. None if probe failed."""
+    r = oc_run(
+        [
+            "get",
+            "authentication",
+            "cluster",
+            "-o",
+            "jsonpath={.spec.oidcProviders}",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        print(
+            f"WARN: could not read Authentication/cluster oidcProviders: {err or 'unknown error'}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
+    raw = (r.stdout or "").strip()
+    return bool(raw) and raw not in ("[]", "null")
+
+
 def _wait_for_byoidc_cluster_signals(*, retries: int = 24, delay_sec: float = 15.0) -> bool:
-    """EaaS may expose ``oidc/byoidc-credentials`` after gateway CR is Ready."""
+    """EPHC may expose ``oidc/byoidc-credentials`` after gateway CR is Ready."""
     for attempt in range(retries):
         if _cluster_is_byoidc():
             return True
@@ -54,10 +85,15 @@ def _wait_for_byoidc_cluster_signals(*, retries: int = 24, delay_sec: float = 15
 def _resolve_byoidc_for_gateway() -> bool:
     if _cluster_is_byoidc():
         return True
-    if not cluster_source_is_eaas():
+    if not cluster_source_is_ephc():
+        return False
+    from install.ldap import _byoidc_credentials_ready
+
+    has_provider = _cluster_has_oidc_provider()
+    if not _byoidc_credentials_ready() and has_provider is False:
         return False
     print(
-        "EaaS cluster: waiting for BYOIDC issuer/credentials before GatewayConfig OIDC patch...",
+        "EPHC cluster: waiting for BYOIDC issuer/credentials before GatewayConfig OIDC patch...",
         flush=True,
     )
     return _wait_for_byoidc_cluster_signals()
@@ -508,6 +544,353 @@ def repair_servicemesh_subscription_stale_refs(namespace: str = "openshift-opera
         if needs_repair and _recreate_subscription(namespace, item):
             repaired += 1
     return repaired
+
+
+def _istio_resource_not_found(stderr: str, stdout: str = "") -> bool:
+    combined = f"{stderr}\n{stdout}".lower()
+    return "notfound" in combined or "not found" in combined
+
+
+def _fetch_openshift_gateway_istio_doc() -> tuple[dict | None, str]:
+    """Return (doc, status) where status is ``ok``, ``missing``, or ``error``."""
+    r = oc_run(
+        ["get", "istio", _OPENSHIFT_GATEWAY_ISTIO_NAME, "-o", "json"],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        if _istio_resource_not_found(r.stderr or "", r.stdout or ""):
+            return None, "missing"
+        print(
+            f"WARN: could not read Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME}: "
+            f"{err or 'unknown error'}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None, "error"
+    if not (r.stdout or "").strip():
+        return None, "missing"
+    try:
+        doc = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None, "error"
+    if not isinstance(doc, dict):
+        return None, "error"
+    return doc, "ok"
+
+
+def _openshift_gateway_istio_doc() -> dict | None:
+    doc, status = _fetch_openshift_gateway_istio_doc()
+    return doc if status == "ok" else None
+
+
+def _istio_reconcile_error_message(doc: dict) -> str:
+    for item in (doc.get("status") or {}).get("conditions") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "Reconciled" and str(item.get("status") or "") == "False":
+            return str(item.get("message") or "")
+    return ""
+
+
+def _is_istio_eol_reconcile_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _ISTIO_EOL_MARKERS) or "cannot be installed" in lowered
+
+
+def _openshift_gateway_istio_wait_sec() -> int:
+    raw = os.environ.get("OPENSHIFT_GATEWAY_ISTIO_WAIT_SEC", "").strip()
+    if not raw:
+        return _DEFAULT_OPENSHIFT_GATEWAY_ISTIO_WAIT_SEC
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"WARN: invalid OPENSHIFT_GATEWAY_ISTIO_WAIT_SEC={raw!r}; "
+            f"using default {_DEFAULT_OPENSHIFT_GATEWAY_ISTIO_WAIT_SEC}s",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _DEFAULT_OPENSHIFT_GATEWAY_ISTIO_WAIT_SEC
+
+
+def _openshift_gateway_istio_reconciled(doc: dict) -> bool:
+    state = str((doc.get("status") or {}).get("state") or "")
+    if state == "ReconcileError":
+        return False
+    for item in (doc.get("status") or {}).get("conditions") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "Reconciled":
+            return str(item.get("status") or "") == "True"
+    return state == "Healthy"
+
+
+def _openshift_gateway_istio_revision_doc() -> dict | None:
+    r = oc_run(
+        [
+            "get",
+            "istiorevision",
+            _OPENSHIFT_GATEWAY_ISTIO_NAME,
+            "-n",
+            _OPENSHIFT_GATEWAY_NS,
+            "-o",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None
+    try:
+        doc = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _istiorevision_ready(doc: dict) -> bool:
+    status = str((doc.get("status") or {}).get("status") or "").strip()
+    if status == "Healthy":
+        return True
+    for item in (doc.get("status") or {}).get("conditions") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "Ready" and str(item.get("status") or "") == "True":
+            return True
+    return False
+
+
+def _openshift_gateway_controller_ready() -> bool:
+    r = oc_run(
+        [
+            "get",
+            "deployment",
+            _OPENSHIFT_GATEWAY_ISTIOD,
+            "-n",
+            _OPENSHIFT_GATEWAY_NS,
+            "-o",
+            "jsonpath={.status.availableReplicas}",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if r.returncode != 0:
+        return False
+    try:
+        return int((r.stdout or "0").strip() or "0") >= 1
+    except ValueError:
+        return False
+
+
+def _openshift_gateway_istio_stack_ready(*, target_version: str | None = None) -> bool:
+    """True when openshift-gateway controller is up (Istio CR or revision+istiod)."""
+    doc = _openshift_gateway_istio_doc()
+    if doc and _openshift_gateway_istio_reconciled(doc):
+        if target_version:
+            istio_version = str((doc.get("spec") or {}).get("version") or "").strip()
+            if istio_version and istio_version != target_version:
+                return False
+        return True
+    revision = _openshift_gateway_istio_revision_doc()
+    if not revision or not _istiorevision_ready(revision):
+        return False
+    if target_version:
+        revision_version = str((revision.get("spec") or {}).get("version") or "").strip()
+        if revision_version and revision_version != target_version:
+            return False
+    return _openshift_gateway_controller_ready()
+
+
+def openshift_gateway_istio_stack_ready(*, target_version: str | None = None) -> bool:
+    """Public probe for install-dep-operators and tests."""
+    return _openshift_gateway_istio_stack_ready(target_version=target_version)
+
+
+def _parse_istio_version_from_alm_examples(alm_raw: str) -> str | None:
+    try:
+        examples = json.loads(alm_raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(examples, list):
+        return None
+    for item in examples:
+        if not isinstance(item, dict) or item.get("kind") != "Istio":
+            continue
+        version = str((item.get("spec") or {}).get("version") or "").strip()
+        if version:
+            return version
+    return None
+
+
+def _servicemesh_istio_version_from_csv(namespace: str = "openshift-operators") -> str | None:
+    env_version = os.environ.get("SERVICEMESH_ISTIO_VERSION", "").strip()
+    if env_version:
+        return env_version
+    r = oc_run(
+        ["get", "csv", "-n", namespace, "-o", "json"],
+        check=False,
+        capture_output=True,
+        timeout=60,
+    )
+    if r.returncode != 0:
+        return None
+    try:
+        doc = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    for item in doc.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        name = ((item.get("metadata") or {}).get("name") or "").lower()
+        if not name.startswith(_SERVICEMESH_CSV_PREFIX):
+            continue
+        phase = ((item.get("status") or {}).get("phase") or "").strip()
+        if phase != "Succeeded":
+            continue
+        annotations = (item.get("metadata") or {}).get("annotations") or {}
+        version = _parse_istio_version_from_alm_examples(str(annotations.get("alm-examples") or ""))
+        if version:
+            return version
+    return None
+
+
+def reconcile_openshift_gateway_istio_eol(namespace: str = "openshift-operators") -> bool:
+    """Patch cluster Istio/openshift-gateway when OSSM rejects an end-of-life spec.version."""
+    doc = _openshift_gateway_istio_doc()
+    if not doc:
+        return False
+    state = str((doc.get("status") or {}).get("state") or "")
+    message = _istio_reconcile_error_message(doc)
+    if state != "ReconcileError" or not _is_istio_eol_reconcile_error(message):
+        return False
+    current = str((doc.get("spec") or {}).get("version") or "").strip()
+    target = _servicemesh_istio_version_from_csv(namespace)
+    if not target:
+        print(
+            "WARN: openshift-gateway Istio is end-of-life but no supported version found "
+            "(set SERVICEMESH_ISTIO_VERSION or install Service Mesh CSV)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    if current == target:
+        return False
+    patch_doc = {"spec": {"version": target}}
+    r = oc_run(
+        [
+            "patch",
+            "istio",
+            _OPENSHIFT_GATEWAY_ISTIO_NAME,
+            "--type=merge",
+            "-p",
+            json.dumps(patch_doc),
+        ],
+        check=False,
+        capture_output=True,
+        timeout=60,
+    )
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        print(
+            f"WARN: could not patch Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} to {target}: {err}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    print(
+        f"✓ Patched Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} version {current or '?'} -> {target}",
+        flush=True,
+    )
+    return True
+
+
+def wait_openshift_gateway_istio_ready(
+    *, timeout_sec: int = 300, target_version: str | None = None
+) -> bool:
+    """Wait for openshift-gateway Istio stack (CR reconcile or revision+istiod after EOL patch)."""
+    print(
+        f"Waiting for Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} reconcile (up to {timeout_sec}s)...",
+        flush=True,
+    )
+    deadline = time.monotonic() + timeout_sec
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        if _openshift_gateway_istio_stack_ready(target_version=target_version):
+            doc = _openshift_gateway_istio_doc()
+            if doc and _openshift_gateway_istio_reconciled(doc):
+                state = str((doc.get("status") or {}).get("state") or "")
+                print(
+                    f"✓ Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} reconciled (state={state or 'Ready'})",
+                    flush=True,
+                )
+            else:
+                revision = _openshift_gateway_istio_revision_doc()
+                rev_version = str((revision.get("spec") or {}).get("version") or "?") if revision else "?"
+                print(
+                    f"✓ Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} controller ready "
+                    f"(revision={rev_version}, istiod available)",
+                    flush=True,
+                )
+            return True
+        doc = _openshift_gateway_istio_doc()
+        if doc:
+            state = str((doc.get("status") or {}).get("state") or "")
+            message = _istio_reconcile_error_message(doc)
+            print(
+                f"  Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} attempt {attempt}: "
+                f"state={state or '?'} message={message or 'pending'}",
+                flush=True,
+            )
+        else:
+            print(f"  Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} attempt {attempt}: CR not found", flush=True)
+        time.sleep(15)
+    print(
+        f"WARN: Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} not reconciled within {timeout_sec}s",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False
+
+
+def ensure_openshift_gateway_istio_for_dep_operators(namespace: str = "openshift-operators") -> bool:
+    """install-dep-operators: fix EOL openshift-gateway Istio before RHOAI gateway stack install."""
+    target_version = _servicemesh_istio_version_from_csv(namespace)
+    if _openshift_gateway_istio_stack_ready(target_version=target_version):
+        return True
+    doc, status = _fetch_openshift_gateway_istio_doc()
+    if status == "missing":
+        return True
+    if status == "error" or not doc:
+        return False
+    if _openshift_gateway_istio_reconciled(doc):
+        if target_version:
+            istio_version = str((doc.get("spec") or {}).get("version") or "").strip()
+            if not istio_version or istio_version == target_version:
+                return True
+        else:
+            return True
+    message = _istio_reconcile_error_message(doc)
+    if not _is_istio_eol_reconcile_error(message):
+        state = str((doc.get("status") or {}).get("state") or "")
+        print(
+            f"WARN: Istio/{_OPENSHIFT_GATEWAY_ISTIO_NAME} not reconciled "
+            f"(state={state or '?'}); not an EOL version issue",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    if not reconcile_openshift_gateway_istio_eol(namespace):
+        return False
+    return wait_openshift_gateway_istio_ready(
+        timeout_sec=_openshift_gateway_istio_wait_sec(),
+        target_version=target_version,
+    )
 
 
 def reconcile_servicemesh_olm_conflicts(namespace: str = "openshift-operators") -> int:

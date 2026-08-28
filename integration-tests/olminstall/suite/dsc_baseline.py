@@ -2,7 +2,9 @@
 
 After global prep captures the intended DSC spec.components state as a baseline,
 each component task compares, fails-on-drift (when attributable), and restores
-before the next task. Hygiene runs from finalize-component-exit for all runners.
+before the next task. Hygiene also waits when baseline-Managed Ready conditions
+are not True (``Removed`` lag or ``DeploymentsNotReady`` flaps). Hygiene runs
+from finalize-component-exit for all runners and before pytest/golang orchestrate.
 """
 
 from __future__ import annotations
@@ -212,7 +214,12 @@ def wait_for_baseline_spec(
 
 
 def check_baseline_managed_ready_stale(artifacts_dir: Path) -> set[str]:
-    """Baseline-Managed DSC keys whose Ready condition still reports reason=Removed."""
+    """Baseline-Managed DSC keys whose Ready condition is not True.
+
+    Covers post-enable lag (``reason=Removed``) and runtime flaps such as
+    ``DeploymentsNotReady`` that leave ``phase: Not Ready`` without
+    ``spec.components`` managementState drift.
+    """
     baseline = load_dsc_baseline(artifacts_dir)
     if baseline is None:
         return set()
@@ -225,10 +232,32 @@ def check_baseline_managed_ready_stale(artifacts_dir: Path) -> set[str]:
         ready_type = _DSC_KEY_READY_CONDITION.get(key)
         if not ready_type:
             continue
-        _, reason, _ = _dsc_condition(ready_type)
-        if reason == "Removed":
+        status, _reason, _message = _dsc_condition(ready_type)
+        if status != "True":
             stale.add(key)
     return stale
+
+
+def _dsc_reconcile_wait_timeout_sec() -> int:
+    """Default 600s; cap lower on EPHC so dead guests do not burn 10m per component."""
+    raw = os.environ.get("OLMINSTALL_DSC_RECONCILE_WAIT_SEC", "600").strip()
+    try:
+        timeout = int(raw)
+    except ValueError:
+        timeout = 600
+    from suite.its_trigger_params import is_ephemeral_hosted_cluster_source
+
+    source = os.environ.get("CLUSTER_SOURCE", "").strip()
+    if not is_ephemeral_hosted_cluster_source(source):
+        return timeout
+    cap_raw = os.environ.get("OLMINSTALL_EPHC_DSC_RECONCILE_WAIT_SEC", "120").strip()
+    try:
+        cap = int(cap_raw)
+    except ValueError:
+        cap = 120
+    if cap <= 0:
+        return timeout
+    return min(timeout, cap)
 
 
 def wait_for_ready_reconcile(
@@ -246,12 +275,23 @@ def wait_for_ready_reconcile(
             ready_types.append(ready_type)
     if not ready_types:
         return True
-    timeout = timeout_sec
-    if timeout is None:
-        timeout = int(os.environ.get("OLMINSTALL_DSC_RECONCILE_WAIT_SEC", "600"))
+    timeout = timeout_sec if timeout_sec is not None else _dsc_reconcile_wait_timeout_sec()
     deadline = time.time() + timeout
     pending = set(ready_types)
     while time.time() < deadline:
+        from suite.cluster_api_health import cluster_api_unreachable_reason
+
+        api_dead = cluster_api_unreachable_reason()
+        if api_dead:
+            from steps.cluster_prep_state import mark_cluster_api_unreachable
+
+            mark_cluster_api_unreachable(api_dead)
+            print(
+                f"WARN: DSC Ready wait aborted ({api_dead})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
         pending = {rt for rt in pending if _dsc_condition(rt)[0] != "True"}
         if not pending:
             print(
@@ -273,16 +313,27 @@ def _restore_and_reconcile_dsc(
     *,
     all_drifts: list[str],
     stale_keys: set[str],
+    skip_reconcile_if_restore_failed: bool = False,
 ) -> None:
     """Restore baseline spec and poll Ready for drifted or stale-Managed keys."""
     reconcile_keys = {_drift_dsc_key(line) for line in all_drifts} | stale_keys
+    restore_ok = True
     if all_drifts:
-        if restore_dsc_from_baseline(artifacts_dir):
+        restore_ok = restore_dsc_from_baseline(artifacts_dir)
+        if restore_ok:
             wait_for_baseline_spec(artifacts_dir)
     elif stale_keys:
-        restore_dsc_from_baseline(artifacts_dir)
-    if reconcile_keys:
-        wait_for_ready_reconcile(reconcile_keys)
+        restore_ok = restore_dsc_from_baseline(artifacts_dir)
+    if not reconcile_keys:
+        return
+    if skip_reconcile_if_restore_failed and not restore_ok:
+        print(
+            "NOTE: skip DSC Ready reconcile wait after finalize "
+            "(baseline restore failed; reconcile-before-pytest unchanged)",
+            flush=True,
+        )
+        return
+    wait_for_ready_reconcile(reconcile_keys)
 
 
 def reconcile_baseline_dsc_before_component(
@@ -290,6 +341,10 @@ def reconcile_baseline_dsc_before_component(
     artifacts_dir: Path,
 ) -> None:
     """Before orchestrate prereq gate: fix baseline spec drift and stale Ready conditions."""
+    from suite.cluster_api_health import cluster_smoke_infra_blocked_reason
+
+    if cluster_smoke_infra_blocked_reason():
+        return
     try:
         all_drifts = check_dsc_drift(artifacts_dir)
         stale_keys = check_baseline_managed_ready_stale(artifacts_dir)
@@ -367,6 +422,7 @@ def finalize_component_dsc_hygiene(
             artifacts_dir,
             all_drifts=all_drifts,
             stale_keys=stale_keys,
+            skip_reconcile_if_restore_failed=True,
         )
     except Exception as exc:
         print(

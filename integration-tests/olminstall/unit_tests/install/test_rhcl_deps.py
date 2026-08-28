@@ -258,13 +258,21 @@ class RhclDepsTest(unittest.TestCase):
         self.assertEqual(len(delete_calls), 1)
         self.assertEqual(delete_calls[0].args[0][2], mod._OLMINSTALL_OPERATORGROUP)
 
+    @patch(
+        "components.maas_billing.gateway.wait_openshift_default_gateway_class_accepted",
+        return_value=True,
+    )
     @patch("install.rhcl_deps.run_post_install_rhcl_operator")
     @patch("install.rhcl_deps.ensure_rhcl_operator_for_maas")
-    def test_dependency_stack_runs_post_install(self, ensure_rhcl, post_install) -> None:
+    def test_dependency_stack_runs_post_install(self, ensure_rhcl, post_install, _gateway) -> None:
         mod.ensure_maas_rhcl_dependency_stack()
         ensure_rhcl.assert_called_once()
         post_install.assert_called_once_with(fatal=True)
 
+    @patch(
+        "components.maas_billing.gateway.wait_openshift_default_gateway_class_accepted",
+        return_value=True,
+    )
     @patch("install.dependency_operators.product_install_path", return_value=True)
     @patch(
         "components.maas_billing.auth.recover_kuadrant_after_gateway_api_provider",
@@ -280,6 +288,7 @@ class RhclDepsTest(unittest.TestCase):
         write_marker,
         _recover,
         _product_install,
+        _gateway,
     ) -> None:
         mod.ensure_maas_rhcl_dependency_stack()
         ensure_rhcl.assert_called_once()
@@ -289,7 +298,11 @@ class RhclDepsTest(unittest.TestCase):
         post_install.assert_any_call(fatal=False, timeout_sec=600)
         write_marker.assert_called_once()
 
-    @patch.dict(os.environ, {"PRODUCT": "existing", "INSTALL_DEPENDENCIES": "true"}, clear=False)
+    @patch.dict(os.environ, {"PRODUCT": "", "INSTALL_DEPENDENCIES": "true"}, clear=False)
+    @patch(
+        "components.maas_billing.gateway.wait_openshift_default_gateway_class_accepted",
+        return_value=True,
+    )
     @patch(
         "components.maas_billing.auth.recover_kuadrant_after_gateway_api_provider",
         return_value=False,
@@ -303,6 +316,7 @@ class RhclDepsTest(unittest.TestCase):
         post_install,
         write_marker,
         _recover,
+        _gateway,
     ) -> None:
         mod.ensure_maas_rhcl_dependency_stack()
         ensure_rhcl.assert_called_once()
@@ -311,8 +325,12 @@ class RhclDepsTest(unittest.TestCase):
 
     @patch.dict(
         os.environ,
-        {"PRODUCT": "existing", "RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS": "true"},
+        {"PRODUCT": "", "RUN_COMPONENT_CLUSTER_PREP_IN_DEP_OPERATORS": "true"},
         clear=False,
+    )
+    @patch(
+        "components.maas_billing.gateway.wait_openshift_default_gateway_class_accepted",
+        return_value=True,
     )
     @patch(
         "components.maas_billing.auth.recover_kuadrant_after_gateway_api_provider",
@@ -327,12 +345,17 @@ class RhclDepsTest(unittest.TestCase):
         post_install,
         write_marker,
         _recover,
+        _gateway,
     ) -> None:
         mod.ensure_maas_rhcl_dependency_stack()
         ensure_rhcl.assert_called_once()
         self.assertEqual(post_install.call_count, 3)
         write_marker.assert_called_once()
 
+    @patch(
+        "components.maas_billing.gateway.wait_openshift_default_gateway_class_accepted",
+        return_value=True,
+    )
     @patch("install.dependency_operators.product_install_path", return_value=True)
     @patch(
         "components.maas_billing.auth.recover_kuadrant_after_gateway_api_provider",
@@ -348,6 +371,7 @@ class RhclDepsTest(unittest.TestCase):
         write_marker,
         recover,
         _product_install,
+        _gateway,
     ) -> None:
         mod.ensure_maas_rhcl_dependency_stack()
         ensure_rhcl.assert_called_once()
@@ -356,6 +380,10 @@ class RhclDepsTest(unittest.TestCase):
         write_marker.assert_not_called()
 
     @patch.dict(os.environ, {"RHCL_POST_INSTALL_RETRY_TIMEOUT_SEC": "120"}, clear=False)
+    @patch(
+        "components.maas_billing.gateway.wait_openshift_default_gateway_class_accepted",
+        return_value=True,
+    )
     @patch("install.dependency_operators.product_install_path", return_value=True)
     @patch("install.rhcl_deps.run_post_install_rhcl_operator", side_effect=[False, True])
     @patch("install.rhcl_deps.ensure_rhcl_operator_for_maas")
@@ -364,6 +392,7 @@ class RhclDepsTest(unittest.TestCase):
         ensure_rhcl,
         post_install,
         _product_install,
+        _gateway,
     ) -> None:
         mod.ensure_maas_rhcl_dependency_stack()
         ensure_rhcl.assert_called_once()

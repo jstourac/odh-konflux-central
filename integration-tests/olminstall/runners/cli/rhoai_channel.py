@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import re
 
-from suite.its_trigger_params import rhoai_version_from_app
-
 
 def _stable_channel_version(version: str) -> str:
     """Normalize version strings to major.minor for OLM stable-* channels."""
@@ -17,38 +15,26 @@ def _stable_channel_version(version: str) -> str:
 
 
 def resolve_rhoai_update_channel(*, version: str = "", resolved_app: str = "") -> str | None:
-    """Map ``--rhoai-version`` or a ``rhoai-v*`` application name to an OLM channel.
+    """Map CLI channel defaults for RHOAI Konflux triggers.
 
-    TestOps Jenkins autotrigger-smoke 3.5 EA sets ``UPDATE_CHANNEL=beta`` in ``test-variables.yml``
-    and runs ``setup.sh -t operator -u beta`` for RHOAI 3.5 EA (3.5.0-ea.x). Konflux uses
-    the same rule: ``3.5`` / ``rhoai-v3-5*`` / ``rhoai-v*-ea-*`` → ``beta`` until GA
-    ``stable-3.5`` exists in the FBCF catalog.
+    When ``--rhoai-version`` is set:
+      - EA builds (``3.5-ea.2``, ``3.5.0-ea.2``, …) → ``beta``
+      - major < 3 (RHOAI 2.x) → ``stable``
+      - major >= 3 → ``stable-<major>.<minor>`` (pinned minor line, e.g. ``stable-3.3``)
+    When version is omitted (ITS default / resolved app only), use ``beta``.
 
-    Examples:
-        version=3.5 → beta
-        version=3.5-ea.2 → beta
-        resolved_app=rhoai-v3-5-ea-2 → beta
-        resolved_app=rhoai-v3-4-foo → stable-3.4
+    Use ``--rhoai-channel stable-3.x`` explicitly for the rolling 3.x GA channel.
     """
-    app = (resolved_app or "").strip()
-    if re.search(r"-ea-\d+", app):
+    _ = resolved_app
+    ver = (version or "").strip()
+    if not ver:
         return "beta"
-
-    ver = version.strip()
-    if (
-        re.search(r"-ea[.-]", ver)
-        or re.search(r"-ea-\d", ver)
-        or ver == "3.5"
-        or re.match(r"^rhoai-v3-5(?:-|$)", app)
-    ):
+    if re.search(r"-ea[.-]", ver) or re.search(r"-ea-\d", ver):
         return "beta"
-
-    if ver:
-        return f"stable-{_stable_channel_version(ver)}"
-
-    app_version = _stable_channel_version(rhoai_version_from_app(app))
-    if app_version:
-        return f"stable-{app_version}"
-    if app.startswith("rhoai-v3-"):
-        return "stable-3.x"
-    return None
+    major_match = re.match(r"^(\d+)", ver)
+    if not major_match:
+        return "beta"
+    if int(major_match.group(1)) < 3:
+        return "stable"
+    minor = _stable_channel_version(ver)
+    return f"stable-{minor}" if minor else "beta"

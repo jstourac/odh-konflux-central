@@ -63,6 +63,7 @@ from k8s.smoke_aws_credentials import (
     backfill_shift_left_smoke_secret_from_mlflow,
     ensure_router_ca_in_smoke_secret,
 )
+from .runner_mixin_cleanup import RunnerCleanupMixin
 from .runner_mixin_delete import RunnerDeleteMixin
 from .runner_mixin_its import RunnerItsAdminMixin
 from .runner_mixin_list import RunnerListMixin
@@ -89,6 +90,7 @@ __all__ = [
 class OLMInstallRunner(
     RunnerListMixin,
     RunnerDeleteMixin,
+    RunnerCleanupMixin,
     RunnerTriggerMixin,
     RunnerWatchMixin,
     RunnerItsAdminMixin,
@@ -97,7 +99,7 @@ class OLMInstallRunner(
         self.args = args
         self.script_dir = Path(__file__).resolve().parent.parent.parent
         self.snapshot_file = self.script_dir / "config" / "test-snapshot.yaml"
-        self.its_file = self.script_dir / "tekton" / "its" / "its-rhoai-e2e-eaas-ocp421.yaml"
+        self.its_file = self.script_dir / "tekton" / "its" / "its-rhoai-e2e-ephc-ocp421.yaml"
         self.konflux_ui = args.konflux_ui or ""
         self.ka_host = args.ka_host or ""
         self.konflux_server = args.konflux_server or ""
@@ -177,10 +179,10 @@ class OLMInstallRunner(
 
 
     def _trigger_target_type(self) -> str:
-        if self._external_kubeconfig_its_override():
+        if self._external_kubeconfig_its_override() or (self.external_kubeconfig_secret or "").strip():
             return "external"
         if self.args.product in ("rhoai", "odh"):
-            return "eaas"
+            return "ephc"
         return "stub"
 
 
@@ -425,7 +427,7 @@ class OLMInstallRunner(
 
 
     def read_provision_cluster_cti_name(self) -> str:
-        """Best-effort CTI / HyperShift object name from the install-ocp-cluster TaskRun (live cluster only)."""
+        """Best-effort CTI / HyperShift object name from the stage-ephemeral-kubeconfig TaskRun (live cluster only)."""
         prj = self.get_pipelinerun_json_for_display()
         ann = (prj.get("metadata") or {}).get("annotations") or {}
         cti_ann = (ann.get(ANNOTATION_CLUSTER) or "").strip()
@@ -458,7 +460,12 @@ class OLMInstallRunner(
         for item in data.get("items", []):
             labels = (item.get("metadata") or {}).get("labels") or {}
             task = labels.get("tekton.dev/pipelineTask", "")
-            if task not in ("install-ocp-cluster", "provision-cluster", "external-cluster-ready"):
+            if task not in (
+                "stage-ephemeral-kubeconfig",
+                "install-ocp-cluster",
+                "provision-cluster",
+                "external-cluster-ready",
+            ):
                 continue
             for r in (item.get("status") or {}).get("results", []) or []:
                 if r.get("name") == "clusterName" and isinstance(r.get("value"), str):
@@ -606,6 +613,7 @@ class OLMInstallRunner(
                 kubeconfig_path=path,
                 secret_name="",
                 run_owner=self.run_owner,
+                preferred_context=(getattr(self.args, "external_kubeconfig_context", "") or "").strip(),
             )
             self._external_secret_created_by_cli = True
             return self.external_kubeconfig_secret
@@ -718,6 +726,23 @@ class OLMInstallRunner(
             )
 
 
+    def list_components(self) -> None:
+        """Print the table of available smoke components and descriptions."""
+        cat = self._components_catalog()
+        print("\nAvailable olminstall smoke components:")
+        print("================================================================================")
+        print(f"{'Component ID':<30} | {'Description'}")
+        print("--------------------------------------------------------------------------------")
+        for cid in cat.component_ids:
+            comp = cat.components[cid]
+            desc = comp.description.strip() if comp.description else ""
+            # Handle multi-line descriptions by taking the first line or truncating
+            first_line = desc.split("\n")[0].strip()
+            print(f"{cid:<30} | {first_line}")
+        print("================================================================================")
+        print(f"Total: {len(cat.component_ids)} components")
+        print("Config: integration-tests/olminstall/config/olminstall-components-smoke.yaml\n")
+
     def check_login(self) -> None:
         who = run_cmd(["oc", "whoami"], capture=True, check=False)
         if who.returncode != 0:
@@ -812,6 +837,10 @@ class OLMInstallRunner(
 
 
     def run(self) -> int:
+        if getattr(self.args, "list_components", False):
+            self.list_components()
+            return 0
+
         self.check_login()
 
         if self.args.list_supported_ocp:
@@ -833,6 +862,9 @@ class OLMInstallRunner(
 
         if self.args.delete_pending_pipelines:
             return self.delete_pending_pipelines()
+
+        if getattr(self.args, "cleanup_maintenance", False):
+            return self.run_operator_cleanup()
 
         if self.args.watch_mode:
             self.run_watch_mode()

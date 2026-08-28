@@ -10,11 +10,11 @@ from suite.konflux_task_message import format_konflux_task_message
 class KonfluxTaskMessageFormatTest(unittest.TestCase):
     def test_splits_status_and_hint(self) -> None:
         msg = format_konflux_task_message(
-            "provision-eaas-space: Succeeded - secretRef=my-space-secret",
+            "provision-ephc-space: Succeeded - secretRef=my-space-secret",
         )
         self.assertEqual(
             msg,
-            "provision-eaas-space: Succeeded.\nsecretRef=my-space-secret.",
+            "provision-ephc-space: Succeeded.\nsecretRef=my-space-secret.",
         )
 
     def test_multiline_run_context(self) -> None:

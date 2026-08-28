@@ -14,10 +14,10 @@ from suite.errors import AppError
 
 
 class AssertExternalClusterIdleTest(unittest.TestCase):
-    def test_skips_eaas(self) -> None:
+    def test_skips_ephc(self) -> None:
         wait_for_external_cluster_idle(
             namespace="rhoai-tenant",
-            cluster_source="EAAS",
+            cluster_source="EPHC",
         )
 
     def test_force_skips_busy(self) -> None:

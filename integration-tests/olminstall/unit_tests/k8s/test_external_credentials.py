@@ -31,8 +31,8 @@ def test_external_credentials_secret_name_override() -> None:
 
 
 def test_external_credentials_secret_name_non_external() -> None:
-    assert external_credentials_secret_name("EAAS") == ""
-    assert external_credentials_secret_name("rhoai-quay-secret") == ""
+    assert external_credentials_secret_name("EPHC") == ""
+    assert external_credentials_secret_name("rhoai-external-quay-secret") == ""
 
 
 def test_load_external_cluster_credentials_ok() -> None:

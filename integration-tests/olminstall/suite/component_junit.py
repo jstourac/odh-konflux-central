@@ -54,8 +54,6 @@ def _counts_from_suite_attributes(root: ET.Element) -> dict[str, int] | None:
         failures += _safe_junit_attr(suite.get("failures"))
         errors += _safe_junit_attr(suite.get("errors"))
         skipped += _safe_junit_attr(suite.get("skipped"))
-    if tests <= 0:
-        return None
     passed = tests - failures - errors - skipped
     return {
         "total": tests,
@@ -90,7 +88,7 @@ def junit_counts(xml_path: Path) -> dict[str, int] | None:
             }
     else:
         counts = _counts_from_suite_attributes(root)
-    if counts is None or counts["total"] <= 0:
+    if counts is None:
         return None
     return counts
 

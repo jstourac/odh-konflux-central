@@ -6,7 +6,7 @@ metadata:
   name: olminstall-component-maas-billing
 spec:
   description: |
-    Models-as-a-Service billing smoke tests. May fail on external pooled clusters until MaaS auth gateway setup completes within the task timeout. EaaS HyperShift blocks OAuth IdP patches — keep unprivileged client off (admin SA).
+    Models-as-a-Service billing smoke tests. May fail on external pooled clusters until MaaS auth gateway setup completes within the task timeout. EPHC HyperShift blocks OAuth IdP patches — keep unprivileged client off (admin SA).
 
     - Test framework: opendatahub-tests (pytest).
     - Command: pytest tests/model_serving/maas_billing -m 'smoke' -svv -o junit_suite_name=maas_billing --tc use_unprivileged_client:False.
@@ -23,7 +23,7 @@ spec:
     description: Container image for pytest steps (set by opendatahub-tests-prepare)
   - name: PRODUCT
     type: string
-    default: existing
+    default: ''
   - name: INSTALL_DEPENDENCIES
     type: string
     default: 'false'
@@ -51,8 +51,8 @@ spec:
     default: ''
   - name: COMPONENT_VAULT_SECRET
     type: string
-    default: unused-component-vault-secret
-    description: Per-component shift-left tenant secret (mounted at /smoke-aws-credentials)
+    default: vault-approle
+    description: Unused for envFile mounts; AppRole secret is always vault-approle
   - name: ARTIFACT_BROWSER_URL
     type: string
   - name: ARTIFACT_BROWSER_REPO_PATH
@@ -73,16 +73,16 @@ spec:
     - name: DOCKER_CONFIG
       value: /tmp/odh-home/.docker
   volumes:
+  - name: vault-approle
+    secret:
+      secretName: vault-approle
+      optional: true
+  - name: tenant-test-secrets
+    secret:
+      optional: true
+      secretName: $(params.COMPONENT_VAULT_SECRET)
   - name: component-vault-credentials
-    projected:
-      defaultMode: 420
-      sources:
-      - secret:
-          name: $(params.COMPONENT_VAULT_SECRET)
-          optional: true
-      - secret:
-          name: envfile-codeflare-sdk
-          optional: true
+    emptyDir: {}
   steps:
   - name: run-component-pytest
     displayName: Run component pytest
@@ -96,9 +96,16 @@ spec:
         memory: 4Gi
         cpu: '1'
     volumeMounts:
+    - name: vault-approle
+      mountPath: /vault-approle
+      readOnly: true
+    - name: tenant-test-secrets
+      mountPath: /tenant-test-secrets
+      readOnly: true
     - name: component-vault-credentials
       mountPath: /smoke-aws-credentials
-      readOnly: true
+    - name: component-vault-credentials
+      mountPath: /component-vault-credentials
     env:
     - name: KUBECONFIG
       value: $(workspaces.tests-shared.path)/credentials/kubeconfig

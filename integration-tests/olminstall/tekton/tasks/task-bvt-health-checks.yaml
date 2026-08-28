@@ -22,7 +22,7 @@ spec:
       default: ""
     - name: PRODUCT
       type: string
-      default: "existing"
+      default: ""
   workspaces:
     - name: tests-shared
   results:
@@ -46,10 +46,10 @@ spec:
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: in
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
         - input: "$(params.PRODUCT)"
-          operator: in
-          values: ["existing"]
+          operator: notin
+          values: ["rhoai", "odh"]
       image: quay.io/konflux-ci/konflux-test:stable@sha256:09328e5f47da168ffe951ec9c4242cd6761e61e0a235df1bba3f5158e757446d
       env:
         - name: BVT_ARTIFACTS_DIR
@@ -73,7 +73,7 @@ spec:
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: notin
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
       image: $(params.OPENDATAHUB_TESTS_IMAGE)
       env:
         - name: BVT_SUITE
@@ -96,16 +96,16 @@ spec:
         os.chdir(os.environ["SCRIPTS_REPO_ROOT"])
         os.execvp(sys.executable, [sys.executable, "-m", "runners.run_bvt_pytest"])
 
-    - name: pytest-bvt-gates-eaas
-      displayName: Run BVT on EaaS cluster
+    - name: pytest-bvt-gates-ephc
+      displayName: Run BVT on EPHC cluster
       onError: continue
       when:
         - input: "$(params.CLUSTER_SOURCE)"
           operator: in
-          values: ["", "EAAS"]
+          values: ["", "EPHC"]
         - input: "$(params.PRODUCT)"
-          operator: notin
-          values: ["existing"]
+          operator: in
+          values: ["rhoai", "odh"]
       image: $(params.OPENDATAHUB_TESTS_IMAGE)
       env:
         - name: BVT_SUITE

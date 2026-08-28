@@ -10,7 +10,7 @@ from steps.check_min_rhoai_fbc import main
 
 
 class TestCheckMinRhoaiFbc(unittest.TestCase):
-    @patch.dict(os.environ, {"PRODUCT": "existing"}, clear=False)
+    @patch.dict(os.environ, {"PRODUCT": ""}, clear=False)
     def test_skips_existing_product(self) -> None:
         self.assertEqual(main(), 0)
 

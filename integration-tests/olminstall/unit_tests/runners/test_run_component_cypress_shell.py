@@ -22,8 +22,6 @@ from components.dashboard_cypress.runtime import (
     _reset_dashboard_src_if_ref_changed,
     inject_ci_auth_bypass,
     load_component_vault_env,
-    patch_dashboard_cypress_upstream_tests,
-    patch_dashboard_cypress_ldap_gateway_login,
     patch_gateway_envoyfilter_if_needed,
     patch_runtime_cy_test_config,
     htpasswd_hcp_extra_cypress_skip_tags,

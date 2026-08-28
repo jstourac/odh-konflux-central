@@ -228,7 +228,7 @@ def _cluster_label_from_cluster_source(
 ) -> str:
     """Derive cluster id from tenant kubeconfig Secret name (``CLUSTER_SOURCE``)."""
     secret = (cluster_source or "").strip()
-    if not secret or secret == "EAAS":
+    if not secret or secret == "EPHC":
         return ""
     for prefix in ("olminstall-kubeconfig-", "kubeconfig-"):
         if secret.startswith(prefix):

@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from install.ldap import _cluster_is_byoidc, cluster_has_htpasswd_identity
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS
+from suite.its_trigger_params import CLUSTER_SOURCE_EPHC
 
 _VAULT_MOUNT = Path("/component-vault-credentials")
 _PYTEST_VAULT_MOUNTS: tuple[Path, ...] = (
@@ -47,7 +47,7 @@ def _ldap_style_test_user(username: str) -> bool:
 
 
 def codeflare_byoidc_test_user_overlay() -> dict[str, str]:
-    """On EaaS BYOIDC, use Keycloak users from ``oidc/byoidc-credentials`` (not htpasswd vault)."""
+    """On EPHC BYOIDC, use Keycloak users from ``oidc/byoidc-credentials`` (not htpasswd vault)."""
     from components.maas_billing.oidc_users import byoidc_cypress_test_user
 
     user = byoidc_cypress_test_user()
@@ -89,9 +89,9 @@ def codeflare_htpasswd_test_user_overlay(vault: dict[str, str]) -> dict[str, str
     }
 
 
-def codeflare_eaas_kubeconfig_overlay() -> dict[str, str]:
-    """HyperShift EaaS blocks OAuth IdP patches; use materialized kubeconfig bearer token."""
-    if os.environ.get("CLUSTER_SOURCE", "").strip() != CLUSTER_SOURCE_EAAS:
+def codeflare_ephc_kubeconfig_overlay() -> dict[str, str]:
+    """HyperShift EPHC blocks OAuth IdP patches; use materialized kubeconfig bearer token."""
+    if os.environ.get("CLUSTER_SOURCE", "").strip() != CLUSTER_SOURCE_EPHC:
         return {}
     if _cluster_is_byoidc() or cluster_has_htpasswd_identity():
         return {}
@@ -152,13 +152,13 @@ def codeflare_env_overrides_from_vault(
     if _cluster_is_byoidc():
         overlay = codeflare_byoidc_test_user_overlay()
         if not overlay:
-            overlay = codeflare_eaas_kubeconfig_overlay()
+            overlay = codeflare_ephc_kubeconfig_overlay()
         if not overlay:
             overlay = codeflare_htpasswd_test_user_overlay(vault)
     else:
         overlay = codeflare_htpasswd_test_user_overlay(vault)
         if not overlay:
-            overlay = codeflare_eaas_kubeconfig_overlay()
+            overlay = codeflare_ephc_kubeconfig_overlay()
     dashboard = codeflare_dashboard_url_overlay(artifacts_dir)
     if dashboard:
         overlay = {**overlay, **dashboard}

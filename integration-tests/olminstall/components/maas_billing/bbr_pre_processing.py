@@ -13,6 +13,7 @@ from components.maas_billing.common import (
     _MODELS_AS_SERVICE_DEST,
     _MODELS_AS_SERVICE_REPO,
     _dsc_condition,
+    models_as_service_ready_condition_type,
 )
 
 _BBR_PRE_DEPLOY = "payload-pre-processing"
@@ -201,7 +202,7 @@ def _patch_envoy_filter_bbr_stages(repo: Path) -> None:
 
 def _models_as_service_selector_conflict() -> bool:
     """True when platform reconcile cannot patch openshift-ingress/payload-pre-processing."""
-    status, _, msg = _dsc_condition("ModelsAsServiceReady")
+    status, _, msg = _dsc_condition(models_as_service_ready_condition_type())
     if status == "True":
         return False
     combined = f"{msg}".lower()
@@ -242,11 +243,14 @@ def _wait_models_as_service_after_repair() -> None:
 
     try:
         _wait_for_dsc_component_ready(
-            condition_type="ModelsAsServiceReady",
+            condition_type=models_as_service_ready_condition_type(),
             timeout_sec=maas_resync_timeout_sec(),
         )
     except RuntimeError as exc:
-        print(f"WARN: ModelsAsServiceReady not True after repair ({exc})", flush=True)
+        print(
+            f"WARN: {models_as_service_ready_condition_type()} not True after repair ({exc})",
+            flush=True,
+        )
 
 
 def repair_payload_pre_processing_selector_conflict() -> bool:

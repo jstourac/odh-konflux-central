@@ -9,12 +9,18 @@ from suite.errors import AppError
 from suite.tests_config import TestsCatalog
 
 
+def components_csv_means_all(raw: str | None) -> bool:
+    """Empty COMPONENTS / ``all`` = every enabled catalog id (CLI ``--components all``)."""
+    s = (raw or "").strip().lower()
+    return s in ("", "all")
+
+
 def smoke_selected_component_ids(
     components_csv: str,
     catalog: ComponentsSmokeCatalog,
 ) -> frozenset[str]:
-    """COMPONENTS param for a smoke run; empty means every enabled catalog id."""
-    if not (components_csv or "").strip():
+    """COMPONENTS param for a smoke run; empty or ``all`` means every enabled catalog id."""
+    if components_csv_means_all(components_csv):
         return frozenset(cid for cid in catalog.component_ids if catalog.components[cid].enabled)
     return parse_components_selection(components_csv.strip(), catalog)
 
@@ -27,11 +33,13 @@ def parse_components_selection(raw: str, catalog: ComponentsSmokeCatalog) -> fro
     s = (raw or "").strip()
     if not s:
         return frozenset()
+    tokens = [part.strip().lower() for part in s.split(",") if part.strip()]
+    if tokens == ["all"]:
+        return frozenset(cid for cid in catalog.component_ids if catalog.components[cid].enabled)
+    if "all" in tokens:
+        raise AppError("COMPONENTS token 'all' cannot be mixed with component ids.", 2)
     seen: set[str] = set()
-    for part in s.split(","):
-        tok = part.strip().lower()
-        if not tok:
-            continue
+    for tok in tokens:
         if tok not in catalog.component_ids:
             allowed = ", ".join(catalog.component_ids)
             raise AppError(f"Invalid COMPONENTS token {tok!r}. Allowed: {allowed}.", 2)
@@ -62,7 +70,7 @@ def resolve_components_csv(
         default_components_smoke_config_path()
     )
     s = (raw or "").strip()
-    if not s:
+    if components_csv_means_all(s):
         return cat.enabled_components_csv
     selected = parse_components_selection(s, cat)
     return canonical_components_csv(selected, cat)
@@ -83,7 +91,7 @@ def validate_and_normalize_components_csv(
     path = components_config_path if components_config_path is not None else default_components_smoke_config_path()
     cat = components_catalog if components_catalog is not None else load_components_smoke_catalog(path)
     s = (raw or "").strip()
-    if not s:
+    if components_csv_means_all(s):
         return cat.enabled_components_csv
     selected = parse_components_selection(s, cat)
     return canonical_components_csv(selected, cat)

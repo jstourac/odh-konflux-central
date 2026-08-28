@@ -171,7 +171,7 @@ def components_csv_requires_authorino(components_csv: str) -> bool:
 
 
 def product_install_path() -> bool:
-    """True when the pipeline is installing RHOAI/ODH (not PRODUCT=existing smoke-only)."""
+    """True when the pipeline is installing RHOAI/ODH (not test-only smoke)."""
     return os.environ.get("PRODUCT", "").strip().lower() in ("rhoai", "odh")
 
 
@@ -300,7 +300,7 @@ def _maas_deps_missing_message() -> str:
     if existing_smoke_without_install_dependencies():
         return (
             "Kuadrant/Authorino dependency operators are missing or RHCL CSV is not pinned. "
-            "On PRODUCT=existing, install-dep-operators runs only with INSTALL_DEPENDENCIES=true. "
+            "On test-only runs (omit --product), install-dep-operators runs only with INSTALL_DEPENDENCIES=true. "
             "Retrigger with olm_pipeline.py --install-dependencies, or ensure RHCL/Authorino "
             "are already installed on the cluster."
         )
@@ -572,7 +572,7 @@ def _wait_authorino_cr_exists(*, timeout_sec: int = 120) -> bool:
 
 
 def _ensure_authorino_operators_after_setup(olm_dir: Path, setup_rc: int) -> bool:
-    """Wait for Authorino on slow EaaS clusters, then apply odh-gitops configs and TLS.
+    """Wait for Authorino on slow EPHC clusters, then apply odh-gitops configs and TLS.
 
     Returns True when any recoverable issue was logged (WARN) during recovery.
     """

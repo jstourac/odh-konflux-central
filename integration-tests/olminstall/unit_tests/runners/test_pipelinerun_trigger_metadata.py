@@ -123,8 +123,8 @@ def test_build_konflux_activity_metadata_incoming_when_no_git_rev() -> None:
 def test_build_cli_trigger_metadata_populates_konflux_and_olminstall_fields(no_github_network: None) -> None:
     meta = build_cli_trigger_metadata(
         script_dir=_OLMINSTALL_DIR,
-        trigger_argv=["--product", "existing", "--tests", "bvt"],
-        product="existing",
+        trigger_argv=["--product", "", "--tests", "bvt"],
+        product="",
         tests="bvt",
         fbcf_image=_FBC,
         ocp_version="4.20",
@@ -151,7 +151,7 @@ def test_build_manual_snapshot_trigger_labels(no_github_network: None) -> None:
     labels = build_manual_snapshot_trigger_labels(
         application="testops-playpen",
         run_owner="nmanos",
-        product="existing",
+        product="",
         target_type="external",
         cluster="nmanos-konflux1",
         fbcf_image=_FBC,
@@ -161,7 +161,7 @@ def test_build_manual_snapshot_trigger_labels(no_github_network: None) -> None:
     assert labels[LABEL_TRIGGER_EVENT_TYPE] == EVENT_TYPE_PUSH
     assert labels[LABEL_KONFLUX_APPLICATION] == "testops-playpen"
     assert labels[LABEL_RUN_OWNER] == "nmanos"
-    assert labels[LABEL_PRODUCT] == "existing"
+    assert labels.get(LABEL_PRODUCT, "") == ""
     assert labels[LABEL_CLUSTER] == "nmanos-konflux1"
     assert labels[LABEL_TARGET] == "external"
     assert labels[LABEL_TEST_URL_ORG] == "manosnoam"

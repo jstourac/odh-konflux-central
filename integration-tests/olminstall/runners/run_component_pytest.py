@@ -34,7 +34,7 @@ from suite.component_test_timeout import (
     parse_component_timeout_seconds,
     resolve_component_test_timeout_raw,
 )
-from suite.component_task_exit import resolve_component_exit_codes
+from suite.component_task_exit import component_exit_file_path, resolve_component_exit_codes
 from suite.component_catalog import SmokeComponent, load_components_smoke_catalog
 from suite.component_dsc_gate import smoke_component_prereq_unavailable
 from suite.cluster_api_health import cluster_smoke_infra_blocked_reason, is_definitive_infra_error
@@ -48,6 +48,7 @@ from runners.component_prereqs import (
 )
 from suite.component_plan import parse_components_selection
 from runners.run_bvt_pytest import run_single as run_single_pytest
+from k8s.jenkins_vault import ensure_runtime_vault_env
 from k8s.shift_left_env import (
     apply_cluster_router_ca_from_kubeconfig,
     load_shift_left_env_from_mount,
@@ -58,16 +59,26 @@ from ogx_ea_distribution_plugin import apply_ogx_ea_distribution_patch
 from components.maas_billing.oidc_users import (
     apply_maas_billing_htpasswd_test_user_overrides,
     apply_maas_oidc_client_secret_overrides,
+    maas_billing_aitenant_bootstrap_pytest_extra_args,
     maas_billing_aitenant_pytest_extra_args,
+    maas_billing_ephc_bbr_pytest_extra_args,
     maas_billing_rosa_hcp_pytest_extra_args,
 )
 from steps.tekton_util import (
     prepare_kubeconfig_auth_for_tests,
 )
-from suite.its_trigger_params import CLUSTER_SOURCE_EAAS, is_external_cluster_source
+from suite.its_trigger_params import (
+    CLUSTER_SOURCE_EPHC,
+    is_ephemeral_hosted_cluster_source,
+    is_external_cluster_source,
+    is_pooled_external_cluster_source,
+)
 
-# EaaS/HCP quay mirrors fail registry.redhat.io-only checks (nodeids vary by suite).
-_EAAS_SKIP_IMAGE_VALIDATION = "-k 'not image_validation and not verify_images'"
+# EPHC/HCP quay mirrors fail registry.redhat.io-only checks (nodeids vary by suite).
+_EHC_SKIP_IMAGE_VALIDATION = "-k 'not image_validation and not verify_images'"
+# Pooled HCP: tags already resolved but ImageStream importer retries quay with a stale
+# robot (ImportSuccess=False). EPHC keeps this test (cxn7l: import_success=N/A).
+_EXTERNAL_SKIP_IMAGESTREAM_HEALTH = "-k 'not imagestream_health'"
 # Do not add `-k 'not vector_stores'` here: under smoke+`not pgvector` that empties the
 # suite (A2 kbbjt: 35 deselected / 0 selected → JP4 hollow fail). Keep Jenkins catalog
 # baseline only; vector_stores client-ready hangs stay FailureIgnored until embeddings fix.
@@ -75,20 +86,30 @@ _CLUSTER_SANITY_SKIP_RHOAI = "--cluster-sanity-skip-rhoai-check"
 
 
 def _needs_image_validation_skip() -> bool:
-    """Skip registry.redhat.io-only image checks on mirrored clusters (EaaS IDMS, HCP Kyverno).
+    """Skip registry.redhat.io-only image checks on mirrored clusters (EPHC IDMS, HCP Kyverno).
 
     External ROSA HCP rewrites pulls to quay.io/rhoai; PRODUCT=rhoai cleanup/reinstall
-    hits the same mirror as PRODUCT=existing, so skip for every external CLUSTER_SOURCE.
+    hits the same mirror as test-only PRODUCT, so skip for every external CLUSTER_SOURCE.
     """
     cluster_source = os.environ.get("CLUSTER_SOURCE", "").strip()
-    if cluster_source == CLUSTER_SOURCE_EAAS:
+    if cluster_source == CLUSTER_SOURCE_EPHC:
         return True
     return is_external_cluster_source(cluster_source)
 
 
+def _needs_imagestream_health_skip() -> bool:
+    """Skip workbenches ImageStream ImportSuccess checks on pooled external clusters."""
+    cluster_source = os.environ.get("CLUSTER_SOURCE", "").strip()
+    if cluster_source == CLUSTER_SOURCE_EPHC:
+        return False
+    return is_pooled_external_cluster_source(cluster_source)
+
+
 def _needs_cluster_sanity_rhoai_skip() -> bool:
     """Pooled externals without MaaS DB never reach DSC Ready; skip full-DSC pytest sanity."""
-    if os.environ.get("PRODUCT", "").strip().lower() != "existing":
+    from suite.constants import is_test_only_product
+
+    if not is_test_only_product(os.environ.get("PRODUCT", "")):
         return False
     return is_external_cluster_source(os.environ.get("CLUSTER_SOURCE", ""))
 
@@ -240,53 +261,9 @@ def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
-def _write_single_failure_junit(
-    comp: dict[str, str],
-    *,
-    artifacts_dir: Path,
-    testcase_name: str,
-    message: str,
-    time_seconds: float = 0.0,
-    outcome: str = "failure",
-) -> None:
-    prefix = comp.get("artifact_prefix", "").strip()
-    if not prefix:
-        return
-    junit_path = artifacts_dir / f"{prefix}.xml"
-    if junit_path.exists():
-        return
-    cid = comp.get("id", "unknown")
-    cid_attr = quoteattr(cid)
-    testcase_attr = quoteattr(testcase_name)
-    message_attr = quoteattr(message)
-    time_attr = quoteattr(f"{time_seconds:g}")
-    is_skip = outcome == "skip"
-    failures_attr = "0" if is_skip else "1"
-    skipped_attr = "1" if is_skip else "0"
-    body = (
-        f"    <skipped message={message_attr}>{escape(message)}</skipped>\n"
-        if is_skip
-        else f"    <failure message={message_attr}>{escape(message)}</failure>\n"
-    )
-    xml = (
-        '<?xml version="1.0" encoding="utf-8"?>\n'
-        f"<testsuite name={cid_attr} tests=\"1\" failures=\"{failures_attr}\" errors=\"0\" skipped=\"{skipped_attr}\" "
-        f"time={time_attr} timestamp=\"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\">\n"
-        f"  <testcase classname={cid_attr} name={testcase_attr} time={time_attr}>\n"
-        f"{body}"
-        "  </testcase>\n"
-        "</testsuite>\n"
-    )
-    junit_path.write_text(xml, encoding="utf-8")
-    kind = "skip" if is_skip else "failure"
-    print(
-        f"WARN: wrote synthetic {kind} JUnit for {comp.get('id', '?')} at {junit_path}",
-        file=sys.stderr,
-        flush=True,
-    )
+from runners.component_junit import prereq_junit_outcome, write_single_failure_junit
 
 
-from runners.component_junit import prereq_junit_outcome
 def _return_infra_junit_failure(
     comp: dict[str, str],
     *,
@@ -298,7 +275,7 @@ def _return_infra_junit_failure(
     outcome: str = "failure",
 ) -> int:
     cid = comp.get("id", "unknown")
-    _write_single_failure_junit(
+    write_single_failure_junit(
         comp,
         artifacts_dir=artifacts_dir,
         testcase_name=testcase_name,
@@ -317,13 +294,18 @@ def _return_infra_junit_failure(
     return tekton_ec
 
 
-def _ensure_timeout_junit(comp: dict[str, str], artifacts_dir: Path, timeout_seconds: float | None) -> None:
-    """If timeout killed pytest before writing xUnit, write a synthetic suite for imports.
+def _ensure_failure_junit(
+    comp: dict[str, str],
+    artifacts_dir: Path,
+    raw_ec: int,
+    timeout_seconds: float | None = None,
+) -> None:
+    """If pytest failed (exit != 0) and left no JUnit, write a synthetic failure suite.
 
-    Prefer keeping a partial JUnit that already has real testcases (timeout mid-suite).
+    Prefer keeping a partial JUnit that already has real testcases (e.g. timeout mid-suite).
     Else salvage PASSED/FAILED/ERROR lines from the component console log.
     """
-    if timeout_seconds is None:
+    if raw_ec == 0:
         return
     # artifact_prefix already ends in -smoke (e.g. ogx-smoke); do not append another -smoke.
     prefix = (comp.get("artifact_prefix") or "").strip()
@@ -339,7 +321,7 @@ def _ensure_timeout_junit(comp: dict[str, str], artifacts_dir: Path, timeout_sec
             continue
         if "<testcase" in text and 'name="timeout"' not in text:
             print(
-                f"NOTE: keeping partial JUnit after timeout ({candidate.name}); "
+                f"NOTE: keeping partial JUnit after failure ({candidate.name}); "
                 "not overwriting with synthetic failure",
                 flush=True,
             )
@@ -349,16 +331,24 @@ def _ensure_timeout_junit(comp: dict[str, str], artifacts_dir: Path, timeout_sec
     cid = comp.get("id", "unknown")
     tests_subdir = comp.get("tests_subdir", "")
     marker = comp.get("pytest_marker", "")
-    timeout_txt = f"{timeout_seconds:g}s"
-    _write_single_failure_junit(
+    if raw_ec == 124:
+        message = (
+            f"Component timed out after {timeout_seconds or 0.0:g}s. "
+            f"pytest marker={marker!s}, tests_subdir={tests_subdir!s}"
+        )
+        testcase_name = "timeout"
+    else:
+        message = (
+            f"Component failed with exit {raw_ec} (no JUnit produced). "
+            f"pytest marker={marker!s}, tests_subdir={tests_subdir!s}"
+        )
+        testcase_name = "failure"
+    write_single_failure_junit(
         comp,
         artifacts_dir=artifacts_dir,
-        testcase_name="timeout",
-        message=(
-            f"Component timed out after {timeout_txt}. "
-            f"pytest marker={marker!s}, tests_subdir={tests_subdir!s}"
-        ),
-        time_seconds=timeout_seconds,
+        testcase_name=testcase_name,
+        message=message,
+        time_seconds=timeout_seconds or 0.0,
     )
 
 
@@ -447,7 +437,7 @@ def _apply_non_blocking_timeout(comp: dict[str, str], ec: int, raw_ec: int) -> i
     if raw_ec != 124:
         return ec
     cluster_source = os.environ.get("CLUSTER_SOURCE", "").strip()
-    if cluster_source in ("", CLUSTER_SOURCE_EAAS) and comp.get("id") in ("ogx",):
+    if is_ephemeral_hosted_cluster_source(cluster_source) and comp.get("id") == "ogx":
         return ec
     flag = comp.get("non_blocking_on_timeout", "").strip().lower()
     if flag not in ("1", "true", "yes"):
@@ -492,9 +482,15 @@ def _merge_pytest_k_skip(extra: str, skip_fragment: str) -> str:
 
 
 def _apply_cluster_source_pytest_extra_args(extra: str) -> str:
-    """EaaS IDMS / external HCP mirror quay.io/rhoai; skip registry-only image checks."""
+    """EPHC IDMS / external HCP mirror quay.io/rhoai; skip registry-only image checks."""
     if _needs_image_validation_skip():
-        extra = _merge_pytest_k_skip(extra, _EAAS_SKIP_IMAGE_VALIDATION) if extra else _EAAS_SKIP_IMAGE_VALIDATION
+        extra = _merge_pytest_k_skip(extra, _EHC_SKIP_IMAGE_VALIDATION) if extra else _EHC_SKIP_IMAGE_VALIDATION
+    if _needs_imagestream_health_skip():
+        extra = (
+            _merge_pytest_k_skip(extra, _EXTERNAL_SKIP_IMAGESTREAM_HEALTH)
+            if extra
+            else _EXTERNAL_SKIP_IMAGESTREAM_HEALTH
+        )
     if _needs_cluster_sanity_rhoai_skip() and _CLUSTER_SANITY_SKIP_RHOAI not in extra:
         extra = f"{extra} {_CLUSTER_SANITY_SKIP_RHOAI}".strip() if extra else _CLUSTER_SANITY_SKIP_RHOAI
     return extra
@@ -532,6 +528,8 @@ def _apply_ogx_pytest_extra_args(extra: str) -> str:
     extra = _force_pytest_tc(extra, "distribution_name", _OGX_EA_DISTRIBUTION)
     if "-p ogx_ea_distribution_plugin" not in extra:
         extra = f"-p ogx_ea_distribution_plugin {extra}".strip()
+    if "-p ogx_tekton_route_plugin" not in extra:
+        extra = f"-p ogx_tekton_route_plugin {extra}".strip()
     return extra
 
 
@@ -543,17 +541,23 @@ def _materialize_ogx_ea_conftest(artifacts_dir: Path) -> None:
     work.mkdir(parents=True, exist_ok=True)
     root = _OLMINSTALL_ROOT
     plugin_src = root / "ogx_ea_distribution_plugin.py"
+    tekton_src = root / "ogx_tekton_route_plugin.py"
     shutil.copy2(plugin_src, work / "ogx_ea_distribution_plugin.py")
+    shutil.copy2(tekton_src, work / "ogx_tekton_route_plugin.py")
     (work / "sitecustomize.py").write_text(
         "import ogx_ea_distribution_plugin as _ogx_ea\n"
-        "_ogx_ea.apply_ogx_ea_distribution_patch()\n",
+        "import ogx_tekton_route_plugin as _ogx_tekton\n"
+        "_ogx_ea.apply_ogx_ea_distribution_patch()\n"
+        "_ogx_tekton.apply_ogx_tekton_route_patch()\n",
         encoding="utf-8",
     )
     (work / "conftest.py").write_text(
         f"import sys\nsys.path.insert(0, {str(root)!r})\n"
         "import ogx_ea_distribution_plugin as _ogx_ea\n"
+        "import ogx_tekton_route_plugin as _ogx_tekton\n"
         "def pytest_configure(config):\n"
-        "    _ogx_ea.pytest_configure(config)\n",
+        "    _ogx_ea.pytest_configure(config)\n"
+        "    _ogx_tekton.pytest_configure(config)\n",
         encoding="utf-8",
     )
 
@@ -563,6 +567,7 @@ _MODEL_SERVING_COMPONENT_IDS = frozenset({"model_server", "model_runtime", "maas
 # (MaaSPrerequisites / dashboard lag after install). Wait like BVT before invoking pytest.
 _FULL_DSC_READY_COMPONENT_IDS = frozenset(
     {
+        "maas_billing",
         "ogx",
         "ai_safety",
         "ai_safety_evalhub",
@@ -595,7 +600,9 @@ def _collect_only_mode() -> bool:
     if kubeconfig and Path(kubeconfig).is_file():
         return False
     product = os.environ.get("PRODUCT", "").strip().lower()
-    return product in ("", "existing")
+    from suite.constants import is_test_only_product
+
+    return is_test_only_product(product)
 
 
 def _read_exit_code(path: Path) -> int:
@@ -608,7 +615,8 @@ def _read_exit_code(path: Path) -> int:
 
 
 def _component_exit_path() -> Path:
-    return _artifacts_dir() / "component-test.exit"
+    cid = _filter_component_id() or ""
+    return component_exit_file_path(_artifacts_dir(), cid)
 
 
 def _accumulate_exit_file(ec: int) -> None:
@@ -665,12 +673,11 @@ def _run_one_component(
     os.environ["PYTEST_MARKER"] = marker
     extra = _apply_cluster_source_pytest_extra_args(comp["pytest_extra_args"])
     if cid == "maas_billing":
-        from components.maas_billing.oidc_users import maas_billing_aitenant_bootstrap_pytest_extra_args
-
         for skip_fn in (
             maas_billing_rosa_hcp_pytest_extra_args,
             maas_billing_aitenant_pytest_extra_args,
             maas_billing_aitenant_bootstrap_pytest_extra_args,
+            maas_billing_ephc_bbr_pytest_extra_args,
         ):
             maas_skip = skip_fn()
             if maas_skip:
@@ -693,23 +700,15 @@ def _run_one_component(
             f"SKIP component tests {cid}: version gate ({version_skip})",
             flush=True,
         )
-        _write_single_failure_junit(
+        return _return_infra_junit_failure(
             comp,
             artifacts_dir=artifacts_dir,
+            prefix_by_id=prefix_by_id,
             testcase_name="version_not_supported",
             message=version_skip,
+            refresh_test_output=refresh_test_output,
             outcome="skip",
         )
-        prefix_by_id[cid] = comp["artifact_prefix"]
-        strict_ec, tekton_ec = resolve_component_exit_codes(
-            comp,
-            raw_ec=1,
-            artifacts_dir=artifacts_dir,
-        )
-        if _filter_component_id():
-            _accumulate_exit_file(strict_ec)
-        refresh_test_output()
-        return tekton_ec
     if not collect_only:
         tekton_kubeconfig = os.environ.get("KUBECONFIG", "").strip()
         prepare_kubeconfig_auth_for_tests(tekton_kubeconfig_path=tekton_kubeconfig)
@@ -756,6 +755,22 @@ def _run_one_component(
         run_pooled_external_smoke_prep(cid)
         if not cluster_prep_already_done(artifacts_dir):
             prepare_component_for_smoke(cid)
+        # Heal baseline-Managed Ready flaps (DeploymentsNotReady, Removed, …) before pytest.
+        reconcile_baseline_dsc_before_component(cid, artifacts_dir)
+        api_reason = cluster_smoke_infra_blocked_reason()
+        if api_reason:
+            print(
+                f"FAIL component tests {cid}: {api_reason} — skipping pytest",
+                flush=True,
+            )
+            return _return_infra_junit_failure(
+                comp,
+                artifacts_dir=artifacts_dir,
+                prefix_by_id=prefix_by_id,
+                testcase_name="cluster_smoke_infra_blocked",
+                message=api_reason,
+                refresh_test_output=refresh_test_output,
+            )
     if not collect_only and _needs_full_dsc_ready_before_pytest(cid):
         from components.maas_billing.timeouts import bvt_dsc_ready_timeout_sec
         from components.maas_billing.wait import require_dsc_ready_for_bvt
@@ -780,56 +795,38 @@ def _run_one_component(
                 refresh_test_output=refresh_test_output,
             )
     if _truthy_env("FAIL_FAST_DISABLED_COMPONENT"):
-        reconcile_baseline_dsc_before_component(cid, artifacts_dir)
         unavailable, reason = smoke_component_prereq_unavailable(cid)
         if unavailable:
             print(
                 f"FAIL component tests {cid}: component not ready ({reason}) — skipping pytest",
                 flush=True,
             )
-            _write_single_failure_junit(
+            return _return_infra_junit_failure(
                 comp,
                 artifacts_dir=artifacts_dir,
+                prefix_by_id=prefix_by_id,
                 testcase_name="component_not_ready",
                 message=f"Component not ready for {cid}: {reason}",
+                refresh_test_output=refresh_test_output,
                 outcome=prereq_junit_outcome(reason),
             )
-            prefix_by_id[cid] = comp["artifact_prefix"]
-            strict_ec, tekton_ec = resolve_component_exit_codes(
-                comp,
-                raw_ec=1,
-                artifacts_dir=artifacts_dir,
-            )
-            if _filter_component_id():
-                _accumulate_exit_file(strict_ec)
-            refresh_test_output()
-            return tekton_ec
     if not collect_only and cid in _MODEL_SERVING_COMPONENT_IDS:
         promote_shift_left_aws_env()
         if not os.environ.get("AWS_ACCESS_KEY_ID", "").strip():
             msg = (
                 f"AWS_ACCESS_KEY_ID unset after shift-left promote for {cid} "
-                "(check shiftleft-envfile-model-serving tenant secret; trigger backfills from "
-                "envfile-mlflow when keys are empty)"
+                "(check tenant vault-approle and Vault apps/rhods-ci/shift-left envFileCommon)"
             )
             print(f"ERROR: {msg}", file=sys.stderr, flush=True)
-            _write_single_failure_junit(
+            return _return_infra_junit_failure(
                 comp,
                 artifacts_dir=artifacts_dir,
+                prefix_by_id=prefix_by_id,
                 testcase_name="shift_left_aws_credentials_missing",
                 message=msg,
+                refresh_test_output=refresh_test_output,
                 outcome="failure",
             )
-            prefix_by_id[cid] = comp["artifact_prefix"]
-            strict_ec, tekton_ec = resolve_component_exit_codes(
-                comp,
-                raw_ec=1,
-                artifacts_dir=artifacts_dir,
-            )
-            if _filter_component_id():
-                _accumulate_exit_file(strict_ec)
-            refresh_test_output()
-            return tekton_ec
         if cid == "model_server":
             from k8s.smoke_ci_s3_test_dir import log_model_server_ci_s3_layout
 
@@ -852,6 +849,10 @@ def _run_one_component(
         _ensure_olminstall_on_pythonpath()
         if apply_ogx_ea_distribution_patch():
             print("✓ Patched tests.ogx.server_config for rh-dev (EA.2)", flush=True)
+        from ogx_tekton_route_plugin import apply_ogx_tekton_route_patch
+
+        if apply_ogx_tekton_route_patch():
+            print("✓ Patched tests.ogx.conftest ogx_client for Tekton port-forward", flush=True)
     raw_ec = run_single_pytest(extra_env=pytest_extra_env or None)
     if not collect_only and cid == "ogx":
         from components.ogx.platform_smoke import ensure_ogx_junit_after_pytest
@@ -872,8 +873,8 @@ def _run_one_component(
 
         if os.environ.pop(OLMINSTALL_HTPASSWD_KUBECONFIG_ENV, None):
             prepare_kubeconfig_auth_for_tests(tekton_kubeconfig_path=tekton_kubeconfig)
-    if raw_ec == 124:
-        _ensure_timeout_junit(comp, artifacts_dir, comp_timeout_seconds)
+    if raw_ec != 0:
+        _ensure_failure_junit(comp, artifacts_dir, raw_ec, comp_timeout_seconds)
     strict_ec, tekton_ec = resolve_component_exit_codes(
         comp,
         raw_ec=raw_ec,
@@ -900,6 +901,7 @@ def main() -> int:
         os.environ.setdefault("ARTIFACTS_DIR", str(_artifacts_dir()))
         _ensure_yaml_loader()
         prepare_kubeconfig_auth_for_tests(tekton_kubeconfig_path=tekton_kubeconfig)
+        ensure_runtime_vault_env()
         load_shift_left_env_from_mount()
         promote_shift_left_aws_env()
         if _filter_component_id() == "ogx":
@@ -914,13 +916,10 @@ def main() -> int:
         apply_cluster_router_ca_from_kubeconfig()
         artifacts_dir = _artifacts_dir()
         os.environ.setdefault("ARTIFACTS_DIR", str(artifacts_dir))
-        from steps.tests_payload import resolve_tests_payload_root, tests_payload_tools_bin_dir
-        from runners.orchestrator import stage_git_for_prereqs
+        from runners.orchestrator import prepare_oc_binary_path_for_pytest, stage_git_for_prereqs
 
-        tools_bin = tests_payload_tools_bin_dir(resolve_tests_payload_root(artifacts_dir))
         stage_git_for_prereqs()
-        if tools_bin.is_dir():
-            os.environ["PATH"] = f"{tools_bin}:{os.environ.get('PATH', '')}"
+        prepare_oc_binary_path_for_pytest()
         artifacts_bin = artifacts_dir / "bin"
         if artifacts_bin.is_dir():
             os.environ["PATH"] = f"{artifacts_bin}:{os.environ.get('PATH', '')}"

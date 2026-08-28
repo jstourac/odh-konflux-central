@@ -26,15 +26,11 @@ from components.dashboard_cypress.runtime import (
     _reset_dashboard_src_if_ref_changed,
     inject_ci_auth_bypass,
     load_component_vault_env,
-    patch_dashboard_cypress_upstream_tests,
-    patch_dashboard_cypress_automl_hooks,
-    patch_dashboard_cypress_bearer_auth,
-    patch_dashboard_cypress_ldap_gateway_login,
     patch_gateway_envoyfilter_if_needed,
     patch_runtime_cy_test_config,
     htpasswd_hcp_extra_cypress_skip_tags,
     byoidc_extra_cypress_skip_tags,
-    eaas_bearer_extra_cypress_skip_tags,
+    ephc_bearer_extra_cypress_skip_tags,
     cypress_extra_skip_tags,
     resolve_gateway_auth_overlay,
     resolve_cypress_support_dir,
@@ -344,8 +340,8 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
                 self.assertEqual(user.get("AUTH_TYPE"), "htpasswd-cluster-admin")
                 self.assertEqual(user.get("USERNAME"), "htpasswd-cluster-admin-user")
 
-    def test_byoidc_cypress_poll_settings_eaas_longer_wait(self) -> None:
-        with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False):
+    def test_byoidc_cypress_poll_settings_ephc_longer_wait(self) -> None:
+        with mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False):
             retries, delay = _byoidc_cypress_poll_settings()
         self.assertEqual((retries, delay), (24, 15.0))
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -377,10 +373,10 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             self.assertEqual(overlay.get("TEST_USER"), byoidc_user)
             self.assertEqual(overlay.get("OCP_ADMIN_USER"), byoidc_user)
 
-    def test_resolve_gateway_auth_overlay_eaas_non_byoidc_without_openldap_returns_empty(
+    def test_resolve_gateway_auth_overlay_ephc_non_byoidc_without_openldap_returns_empty(
         self,
     ) -> None:
-        """Non-BYOIDC EaaS without createIDP openldap must not use vault htpasswd template."""
+        """Non-BYOIDC EPHC without createIDP openldap must not use vault htpasswd template."""
         with tempfile.TemporaryDirectory() as tmp:
             vault = Path(tmp) / "vault.yml"
             vault.write_text(
@@ -398,7 +394,7 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            eaas_url = "https://rh-ai.apps.foo.konfluxeaas.com"
+            ephc_url = "https://rh-ai.apps.foo.konflux-ocp-ci.dev"
             with mock.patch(
                 "install.ldap._cluster_is_byoidc",
                 return_value=False,
@@ -408,16 +404,16 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             ), mock.patch(
                 "install.ldap._openldap_secret_ready",
                 return_value=False,
-            ), mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False):
+            ), mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False):
                 overlay = resolve_gateway_auth_overlay(
                     vault,
-                    "eaas-cluster",
-                    odh_dashboard_url=eaas_url,
+                    "ephc-cluster",
+                    odh_dashboard_url=ephc_url,
                 )
             self.assertEqual(overlay, {})
 
-    def test_gateway_cypress_uses_bearer_bypass_konfluxeaas(self) -> None:
-        eaas_url = "https://rh-ai.apps.foo.prod.konfluxeaas.com"
+    def test_gateway_cypress_uses_bearer_bypass_konflux_ocp_ci_guest(self) -> None:
+        ephc_url = "https://rh-ai.apps.foo.prod.konflux-ocp-ci.dev"
         with mock.patch("install.ldap._cluster_is_byoidc", return_value=False), mock.patch(
             "install.ldap.cluster_has_ldap_identity",
             return_value=False,
@@ -426,12 +422,26 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             return_value=False,
         ):
             self.assertTrue(
-                gateway_cypress_uses_bearer_bypass(odh_dashboard_url=eaas_url)
+                gateway_cypress_uses_bearer_bypass(odh_dashboard_url=ephc_url)
+            )
+
+    def test_gateway_cypress_uses_bearer_bypass_oci_ephemeral_even_with_htpasswd_idp(self) -> None:
+        """OpenShift CI guests use hosted-mgmt2 OAuth; overlay htpasswd login 401s (ctcml)."""
+        oci_url = "https://rh-ai.apps.677cb64a4620c92044ef.prod.konflux-ocp-ci.dev"
+        with mock.patch("install.ldap._cluster_is_byoidc", return_value=False), mock.patch(
+            "install.ldap.cluster_has_ldap_identity",
+            return_value=False,
+        ), mock.patch(
+            "install.ldap.cluster_has_htpasswd_identity",
+            return_value=True,
+        ):
+            self.assertTrue(
+                gateway_cypress_uses_bearer_bypass(odh_dashboard_url=oci_url)
             )
 
     def test_gateway_cypress_keeps_bearer_when_openldap_secret_only(self) -> None:
         """HostedCluster VAP: openldap secret without OAuth IdP still needs bearer."""
-        eaas_url = "https://rh-ai.apps.foo.prod.konfluxeaas.com"
+        ephc_url = "https://rh-ai.apps.foo.prod.konflux-ocp-ci.dev"
         with mock.patch("install.ldap._cluster_is_byoidc", return_value=False), mock.patch(
             "install.ldap._openldap_secret_ready",
             return_value=True,
@@ -443,17 +453,17 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             return_value=False,
         ):
             self.assertTrue(
-                gateway_cypress_uses_bearer_bypass(odh_dashboard_url=eaas_url)
+                gateway_cypress_uses_bearer_bypass(odh_dashboard_url=ephc_url)
             )
 
-    def test_gateway_cypress_skips_bearer_bypass_eaas_when_oauth_ldap(self) -> None:
-        eaas_url = "https://rh-ai.apps.foo.prod.konfluxeaas.com"
+    def test_gateway_cypress_uses_bearer_bypass_ephc_when_oauth_ldap(self) -> None:
+        ephc_url = "https://rh-ai.apps.foo.prod.konflux-ocp-ci.dev"
         with mock.patch("install.ldap._cluster_is_byoidc", return_value=False), mock.patch(
             "install.ldap.cluster_has_ldap_identity",
             return_value=True,
         ):
-            self.assertFalse(
-                gateway_cypress_uses_bearer_bypass(odh_dashboard_url=eaas_url)
+            self.assertTrue(
+                gateway_cypress_uses_bearer_bypass(odh_dashboard_url=ephc_url)
             )
 
     def test_gateway_cypress_uses_bearer_bypass_external_hcp_false(self) -> None:
@@ -463,8 +473,8 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
                 gateway_cypress_uses_bearer_bypass(odh_dashboard_url=external)
             )
 
-    def test_validate_gateway_cypress_auth_eaas_requires_oc_token(self) -> None:
-        eaas_url = "https://rh-ai.apps.foo.prod.konfluxeaas.com"
+    def test_validate_gateway_cypress_auth_ephc_requires_oc_token(self) -> None:
+        ephc_url = "https://rh-ai.apps.foo.prod.konflux-ocp-ci.dev"
         with mock.patch("install.ldap._cluster_is_byoidc", return_value=False), mock.patch(
             "install.ldap.cluster_has_ldap_identity",
             return_value=False,
@@ -473,12 +483,12 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             return_value=False,
         ), mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(
-                validate_gateway_cypress_auth(odh_dashboard_url=eaas_url),
+                validate_gateway_cypress_auth(odh_dashboard_url=ephc_url),
                 2,
             )
 
-    def test_validate_gateway_cypress_auth_eaas_with_token_ok(self) -> None:
-        eaas_url = "https://rh-ai.apps.foo.prod.konfluxeaas.com"
+    def test_validate_gateway_cypress_auth_ephc_with_token_ok(self) -> None:
+        ephc_url = "https://rh-ai.apps.foo.prod.konflux-ocp-ci.dev"
         with mock.patch("install.ldap._cluster_is_byoidc", return_value=False), mock.patch(
             "install.ldap.cluster_has_ldap_identity",
             return_value=False,
@@ -486,12 +496,12 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             "install.ldap.cluster_has_htpasswd_identity",
             return_value=False,
         ), mock.patch.dict(os.environ, {"OC_TOKEN": "tok"}, clear=True):
-            self.assertIsNone(validate_gateway_cypress_auth(odh_dashboard_url=eaas_url))
+            self.assertIsNone(validate_gateway_cypress_auth(odh_dashboard_url=ephc_url))
 
-    def test_resolve_gateway_auth_overlay_eaas_openldap_skips_htpasswd_for_bearer(
+    def test_resolve_gateway_auth_overlay_ephc_openldap_skips_htpasswd_for_bearer(
         self,
     ) -> None:
-        """EaaS openldap secret without OAuth IdP keeps bearer; no vault htpasswd overlay."""
+        """EPHC openldap secret without OAuth IdP keeps bearer; no vault htpasswd overlay."""
         with tempfile.TemporaryDirectory() as tmp:
             vault = Path(tmp) / "vault.yml"
             vault.write_text(
@@ -512,7 +522,7 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            eaas_url = "https://rh-ai.apps.foo.konfluxeaas.com"
+            ephc_url = "https://rh-ai.apps.foo.konflux-ocp-ci.dev"
             with mock.patch(
                 "install.ldap._cluster_is_byoidc",
                 return_value=False,
@@ -525,18 +535,18 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             ), mock.patch(
                 "install.ldap._openldap_secret_ready",
                 return_value=True,
-            ), mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False):
+            ), mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False):
                 overlay = resolve_gateway_auth_overlay(
                     vault,
-                    "eaas-cluster",
-                    odh_dashboard_url=eaas_url,
+                    "ephc-cluster",
+                    odh_dashboard_url=ephc_url,
                 )
             self.assertEqual(overlay, {})
 
-    def test_resolve_gateway_auth_overlay_eaas_konfluxeaas_url_without_cluster_source_env(
+    def test_resolve_gateway_auth_overlay_ephc_konflux_ocp_ci_url_without_cluster_source_env(
         self,
     ) -> None:
-        """konfluxeaas.com without OAuth IdP still uses bearer bypass (no vault overlay)."""
+        """konflux-ocp-ci.dev guest URL without OAuth IdP still uses bearer bypass (no vault overlay)."""
         with tempfile.TemporaryDirectory() as tmp:
             vault = Path(tmp) / "vault.yml"
             vault.write_text(
@@ -554,7 +564,7 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            eaas_url = "https://rh-ai.apps.foo.prod.konfluxeaas.com"
+            ephc_url = "https://rh-ai.apps.foo.prod.konflux-ocp-ci.dev"
             with mock.patch(
                 "install.ldap._cluster_is_byoidc",
                 return_value=False,
@@ -570,15 +580,15 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             ), mock.patch.dict(os.environ, {}, clear=True):
                 overlay = resolve_gateway_auth_overlay(
                     vault,
-                    "eaas-cluster",
-                    odh_dashboard_url=eaas_url,
+                    "ephc-cluster",
+                    odh_dashboard_url=ephc_url,
                 )
             self.assertEqual(overlay, {})
 
-    def test_resolve_gateway_auth_overlay_eaas_openldap_without_oauth_skips_ldap_overlay(
+    def test_resolve_gateway_auth_overlay_ephc_openldap_without_oauth_skips_ldap_overlay(
         self,
     ) -> None:
-        """EaaS openldap secret without OAuth IdP keeps bearer; vault LDAP overlay skipped."""
+        """EPHC openldap secret without OAuth IdP keeps bearer; vault LDAP overlay skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             vault = Path(tmp) / "vault.yml"
             vault.write_text(
@@ -605,11 +615,11 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             ), mock.patch(
                 "install.ldap._openldap_secret_ready",
                 return_value=True,
-            ), mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EAAS"}, clear=False):
+            ), mock.patch.dict(os.environ, {"CLUSTER_SOURCE": "EPHC"}, clear=False):
                 overlay = resolve_gateway_auth_overlay(
                     vault,
-                    "eaas-cluster",
-                    odh_dashboard_url="https://rh-ai.apps.foo.konfluxeaas.com",
+                    "ephc-cluster",
+                    odh_dashboard_url="https://rh-ai.apps.foo.konflux-ocp-ci.dev",
                 )
             self.assertEqual(overlay, {})
 
@@ -851,34 +861,6 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             self.assertEqual(overlay.get("CLUSTER_AUTH"), "oidc")
             self.assertEqual(overlay.get("TEST_USER"), byoidc_user)
 
-    def test_patch_dashboard_cypress_ldap_gateway_login(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            app_dir = root / "packages/cypress/cypress/support/commands"
-            app_dir.mkdir(parents=True)
-            app_ts = app_dir / "application.ts"
-            app_ts.write_text(
-                "\n".join(
-                    [
-                        "Cypress.Commands.add('visitWithLogin', (relativeUrl, credentials = HTPASSWD_CLUSTER_ADMIN_USER) => {",
-                        "  if (Cypress.env('MOCK')) {",
-                        "        if (isBYOIDCCluster) {",
-                        "          // For BYOIDC clusters, we expect to be redirected to Keycloak",
-                        "          handleKeycloakLogin(credentials);",
-                        "        } else {",
-                        "      if (currentUrl.includes('keycloak') || currentUrl.includes('/protocol/openid-connect/auth')) {",
-                        "        handleKeycloakLogin(credentials);",
-                        "      }",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            patch_dashboard_cypress_ldap_gateway_login(root)
-            text = app_ts.read_text(encoding="utf-8")
-            self.assertIn("olminstall-patched-ldap-gateway-login-v2", text)
-            self.assertIn("TEST_USER_AUTH_TYPE", text)
-
     def test_resolve_gateway_auth_overlay_byoidc_empty_without_secret(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             vault = Path(tmp) / "vault.yml"
@@ -944,8 +926,8 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
         self.assertIn("@ModelServingCI", extra)
         self.assertIn("@AutoMLCI", extra)
 
-    def test_eaas_bearer_extra_cypress_skip_tags(self) -> None:
-        eaas_url = "https://rh-ai.apps.abc123.prod.konfluxeaas.com"
+    def test_ephc_bearer_extra_cypress_skip_tags(self) -> None:
+        ephc_url = "https://rh-ai.apps.abc123.prod.konflux-ocp-ci.dev"
         with mock.patch(
             "install.ldap._cluster_is_byoidc",
             return_value=False,
@@ -956,17 +938,17 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             "install.ldap.cluster_has_htpasswd_identity",
             return_value=False,
         ):
-            extra = eaas_bearer_extra_cypress_skip_tags(odh_dashboard_url=eaas_url)
+            extra = ephc_bearer_extra_cypress_skip_tags(odh_dashboard_url=ephc_url)
         self.assertEqual(extra, "")
         self.assertEqual(
-            eaas_bearer_extra_cypress_skip_tags(
+            ephc_bearer_extra_cypress_skip_tags(
                 odh_dashboard_url="https://rh-ai.apps.rosa.example.com",
             ),
             "",
         )
 
-    def test_htpasswd_skips_not_applied_on_eaas_bearer(self) -> None:
-        eaas_url = "https://rh-ai.apps.abc123.prod.konfluxeaas.com"
+    def test_htpasswd_skips_not_applied_on_ephc_bearer(self) -> None:
+        ephc_url = "https://rh-ai.apps.abc123.prod.konflux-ocp-ci.dev"
         with mock.patch(
             "install.ldap._cluster_is_byoidc",
             return_value=False,
@@ -977,7 +959,7 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             "install.ldap.cluster_has_htpasswd_identity",
             return_value=False,
         ):
-            extra = cypress_extra_skip_tags(odh_dashboard_url=eaas_url)
+            extra = cypress_extra_skip_tags(odh_dashboard_url=ephc_url)
         self.assertNotIn("@ModelServingCI", extra)
         self.assertNotIn("@ProjectsCI", extra)
         self.assertNotIn("@ModelTrainingCI", extra)
@@ -1098,94 +1080,6 @@ class DashboardCypressRuntimeTest(unittest.TestCase):
             inject_ci_auth_bypass(root / "frontend")
             self.assertTrue((support / "ci-auth-bypass.ts").is_file())
             self.assertIn("ci-auth-bypass", (support / "e2e.ts").read_text(encoding="utf-8"))
-
-    def test_patch_dashboard_cypress_upstream_tests(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            about = (
-                root
-                / "packages/cypress/cypress/tests/e2e/applications/testAboutDialog.cy.ts"
-            )
-            about.parent.mkdir(parents=True)
-            about.write_text(
-                "retryableBefore(async () => {\n"
-                "  getInstalledProductName('default').then((p) => {\n"
-                "    getCsvByDisplayName(productName, 'default').then((csv) => {});\n"
-                "  });\n"
-                "});\n",
-                encoding="utf-8",
-            )
-            patch_dashboard_cypress_upstream_tests(root)
-            text = about.read_text(encoding="utf-8")
-            self.assertIn("olminstall-patched-about-dialog", text)
-            self.assertNotIn("retryableBefore(async () =>", text)
-            self.assertIn("return getInstalledProductName(Cypress.env('OPERATOR_NAMESPACE')", text)
-            self.assertIn("return getCsvByDisplayName(productName, Cypress.env('OPERATOR_NAMESPACE')", text)
-
-    def test_patch_dashboard_cypress_bearer_auth(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            application = root / "packages/cypress/cypress/tests/e2e/application.cy.ts"
-            application.parent.mkdir(parents=True)
-            application.write_text(
-                "describe('application', () => {\n"
-                "  it('loads', () => {\n"
-                "    cy.visitWithLogin('/');\n"
-                "    cy.findByRole('banner', { name: 'page masthead' }).contains(\n"
-                "      HTPASSWD_CLUSTER_ADMIN_USER.USERNAME,\n"
-                "    );\n"
-                "  });\n"
-                "});\n",
-                encoding="utf-8",
-            )
-            catalog = (
-                root
-                / "packages/cypress/cypress/tests/e2e/modelCatalog/testCatalogSettingsAvailable.cy.ts"
-            )
-            catalog.parent.mkdir(parents=True)
-            catalog.write_text(
-                "describe('catalog', () => {\n"
-                "  it('non-admin', {}, () => {\n"
-                "      cy.step('Log into the application as non-admin user');\n"
-                "      cy.visitWithLogin('/', LDAP_CONTRIBUTOR_USER);\n"
-                "  });\n"
-                "});\n",
-                encoding="utf-8",
-            )
-            patch_dashboard_cypress_bearer_auth(root)
-            app_text = application.read_text(encoding="utf-8")
-            self.assertIn("olminstall-patched-bearer-auth", app_text)
-            self.assertIn("Cypress.env('OC_TOKEN')", app_text)
-            catalog_text = catalog.read_text(encoding="utf-8")
-            self.assertIn("cannot impersonate LDAP contributor user", catalog_text)
-
-    def test_patch_dashboard_cypress_automl_hooks(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            automl = (
-                root
-                / "packages/cypress/cypress/tests/e2e/automl/testAutomlBinaryClassification.cy.ts"
-            )
-            automl.parent.mkdir(parents=True)
-            automl.write_text(
-                "describe('x', () => {\n"
-                "  after(() => {\n"
-                "    if (!automlWasEnabled) {\n"
-                "      setAutomlEnabled(false);\n"
-                "    }\n"
-                "    deleteS3TestFiles(projectName, testData.awsBucket, `*${uuid}*`);\n"
-                "  });\n"
-                "});\n",
-                encoding="utf-8",
-            )
-            patch_dashboard_cypress_automl_hooks(root)
-            text = automl.read_text(encoding="utf-8")
-            self.assertIn("olminstall-patched-automl-after-guard", text)
-            self.assertIn("if (!testData?.awsBucket || !projectName)", text)
-            self.assertLess(
-                text.index("setAutomlEnabled(false)"),
-                text.index("if (!testData?.awsBucket"),
-            )
 
     def test_merge_cypress_s3_overlay_from_env(self) -> None:
         from components.dashboard_cypress.auth_overlay import _merge_cypress_s3_overlay
